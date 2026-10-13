@@ -1,0 +1,9 @@
+Revise the received work on the mathematics problem. Check the reasoning and
+incorporate useful corrections into your solution.
+
+{task}
+
+Received work:
+{inputs}
+
+End with your answer in \boxed{{}} and a final line: FINAL: <answer>

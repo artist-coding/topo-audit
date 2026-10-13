@@ -1,0 +1,9 @@
+Solve the mathematics problem, reconciling all received work. Resolve any
+disagreements by reasoning through them and commit to one answer.
+
+{task}
+
+Received work:
+{inputs}
+
+End with your answer in \boxed{{}} and a final line: FINAL: <answer>
