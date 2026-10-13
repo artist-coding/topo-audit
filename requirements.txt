@@ -1,0 +1,9 @@
+# step 1-2
+pandas>=2.2
+pyarrow>=15
+sympy>=1.12
+antlr4-python3-runtime==4.11   # sympy.parsing.latex; without it 0.5 != \frac{1}{2}
+pytest>=8
+
+# step 3 (endpoint client)
+openai>=1.40
