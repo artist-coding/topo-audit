@@ -1,0 +1,23 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# run artifacts (large; regenerate from cache)
+runs/*/
+!runs/.gitkeep
+cache/
+*.sqlite
+*.sqlite-journal
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# data splits are committed (see data/splits/), raw datasets are not
+data/raw/

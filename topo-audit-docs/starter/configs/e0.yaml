@@ -1,0 +1,41 @@
+# E0：单模型、单任务族、可穷举审计空间上的平台期归因
+exp: e0
+
+model:
+  name: qwen3-8b
+  endpoint: http://localhost:8000/v1   # vLLM, OpenAI-compatible
+  max_concurrency: 64
+  temperature: 0.7
+  max_tokens_per_node: 1024
+  thinking: false
+
+task:
+  family: math
+  splits: data/splits/math_v1.json     # train 256 / audit 300 / val 150 / test 500
+
+space: s0                              # 4 nodes, 6 optional forward edges
+
+audit:
+  repeats: 2
+
+optimizers: [random_search, grpo]
+
+budget:
+  max_evals: 200                       # 候选评估次数
+  tasks_per_eval: 24                   # 每次评估用多少道训练题
+
+seeds: [0, 1, 2, 3, 4]
+
+plateau:
+  epsilon: 1.0                         # 预登记的最小有意义提升（分）
+  delta_t: 50                          # 再给多少次评估来检验是否还能涨
+  checkpoints: [25, 50, 100, 150, 200]
+
+bootstrap:
+  iterations: 2000
+
+grpo:
+  group_size: 8
+  lr: 0.1
+  theta_clip: 4.0
+  entropy_reg: 0.01
