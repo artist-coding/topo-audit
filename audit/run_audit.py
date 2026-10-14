@@ -13,11 +13,14 @@ What the tensor covers, and why each part exists:
     audit  300 x 2     selection of G_star, and the cross-fitting that measures the
                        winner's curse
     val    300 x 2     learning curves and the plateau test
-    test  1000 x 1     the population levels in the decomposition
+    test  1000 x 1     the population levels in the decomposition; the 1,000
+                       include all 262 MATH-500 Level 4-5 problems as an anchor
 
-Once it exists, every optimizer, seed, budget and N value replays offline for free.
-That is also why seeds are set to 50: under replay they cost nothing, and the
-seed-level term is what limits the plateau test's resolution.
+Once it exists, every optimizer, seed, budget and N value replays offline for free,
+provided the search seed stays out of the cache key (see Executor.sample_seed).
+Seeds are 20, not 50: replay makes them cheap but not independent -- they share tensor
+cells once the R draws per cell are used -- and in the converged regime a plateau test
+runs in, seeds do not reduce the task-level noise at all (see analysis/plateau.py).
 
 Resumability is the cache's job, not this script's: re-running issues zero endpoint
 calls for cells already present, so an interrupted sweep is restarted by rerunning

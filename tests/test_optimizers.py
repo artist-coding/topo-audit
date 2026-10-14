@@ -23,7 +23,7 @@ from statistics import fmean, pstdev
 import pytest
 
 from data.loaders.math import Task
-from optimizers import AgentPrune, Budget, GreedyLocal, RandomSearch, ReinforceEdge
+from optimizers import PruneFromDense, Budget, GreedyLocal, RandomSearch, ReinforceEdge
 from optimizers.base import EdgeSettings, SearchOptimizer, canonical, distinct_computations
 from optimizers.runner import TaskBatches, discriminability, run_optimizer
 from runtime.cache import RunCache
@@ -33,7 +33,7 @@ from space.s0 import S0_ROLES, declared_nodes, enumerate_space, forward_edges
 from space.topology import Topology
 from tests.mock_endpoint import MockEndpoint
 
-POLICIES = (RandomSearch, ReinforceEdge, AgentPrune, GreedyLocal)
+POLICIES = (RandomSearch, ReinforceEdge, PruneFromDense, GreedyLocal)
 
 
 @pytest.fixture(autouse=True)
@@ -223,7 +223,7 @@ def test_entropy_gradient_clipping_and_constant_group_rewards(space):
 
 
 def test_pruning_stays_on_one_removal_path_and_uses_the_full_budget(space):
-    optimizer = AgentPrune(space, Budget(200, 2), 1)
+    optimizer = PruneFromDense(space, Budget(200, 2), 1)
     visited = []
     while optimizer.budget.left():
         graph, = optimizer.propose()
@@ -242,9 +242,9 @@ def test_pruning_stays_on_one_removal_path_and_uses_the_full_budget(space):
 
 
 def test_mask_learning_consumes_rewards_and_magnitude_regularisation(space):
-    high = AgentPrune(space, Budget(200, 2), 0, magnitude_reg=0.0)
-    low = AgentPrune(space, Budget(200, 2), 0, magnitude_reg=0.0)
-    regularized = AgentPrune(space, Budget(200, 2), 0, magnitude_reg=0.5)
+    high = PruneFromDense(space, Budget(200, 2), 0, magnitude_reg=0.0)
+    low = PruneFromDense(space, Budget(200, 2), 0, magnitude_reg=0.0)
+    regularized = PruneFromDense(space, Budget(200, 2), 0, magnitude_reg=0.5)
     for optimizer, reward in ((high, 1.0), (low, 0.0), (regularized, 1.0)):
         optimizer.observe(results_for(optimizer.propose(), [reward]))
     assert all(a > b for a, b in zip(high.state()["mask_values"], low.state()["mask_values"]))
@@ -331,7 +331,7 @@ def test_real_executor_accounting_every_checkpoint_and_byte_identical_replay(
         assert hint == 0
     assert count == optimizer.budget.spent_evals == 11
     assert tokens == optimizer.budget.spent_tokens
-    if policy is RandomSearch or policy is AgentPrune:
+    if policy is RandomSearch or policy is PruneFromDense:
         assert len(trajectory) == 11
     if policy is ReinforceEdge:
         assert [len(row["candidates"]) for row in trajectory] == [8, 3]
@@ -344,19 +344,52 @@ def test_real_executor_accounting_every_checkpoint_and_byte_identical_replay(
     assert fresh.budget.spent_tokens == tokens  # replay does not turn compute into zero
 
 
-def test_optimizers_and_seeds_receive_identical_tasks_at_each_step(tmp_path, space, training):
+def test_optimizers_at_one_seed_receive_identical_tasks_at_each_step(tmp_path, space, training):
+    """Cross-optimizer pairing: this is what the plateau test and discriminability need."""
     tasks, split = training
     expected = None
-    for seed, policy in itertools.product((0, 4), POLICIES):
+    for policy in POLICIES:
         endpoint = MockEndpoint(tasks, success_rate=1.0)
         executor = executor_at(tmp_path, endpoint)
-        optimizer = policy(space, Budget(9, 3), seed)
+        optimizer = policy(space, Budget(9, 3), 0)
         path = run_optimizer(optimizer, executor, tasks, runs_dir=tmp_path / "runs", split_path=split)
         first_two = [row["task_ids"] for row in rows(path)[:2]]
         assert len(first_two) == 2
         if expected is None:
             expected = first_two
         assert first_two == expected
+
+
+def test_different_search_seeds_receive_different_task_batches(tmp_path, space, training):
+    """A rerun of the study would draw different minibatches, so seeds must too.
+
+    Holding the sequence fixed across seeds removes that variation: the incumbents
+    come out more alike than a real rerun, which makes `frozen` verdicts more likely
+    and the seed-dimension interval too narrow. The earlier version of this test
+    asserted the sequence was shared across seeds and so encoded the defect.
+    """
+    tasks, split = training
+    per_seed = {}
+    for seed in (0, 4, 11):
+        endpoint = MockEndpoint(tasks, success_rate=1.0)
+        executor = executor_at(tmp_path, endpoint)
+        optimizer = RandomSearch(space, Budget(9, 3), seed)
+        path = run_optimizer(optimizer, executor, tasks, runs_dir=tmp_path / "runs",
+                             split_path=split)
+        per_seed[seed] = [row["task_ids"] for row in rows(path)[:2]]
+    assert per_seed[0] != per_seed[4]
+    assert per_seed[0] != per_seed[11]
+    assert per_seed[4] != per_seed[11]
+
+
+def test_batch_sequence_is_reproducible_for_one_seed(training):
+    """Different seeds diverge, but a given seed is still fully determined."""
+    tasks, split = training
+    first = TaskBatches.from_split(tasks, 5, split_path=split, search_seed=7)
+    again = TaskBatches.from_split(tasks, 5, split_path=split, search_seed=7)
+    other = TaskBatches.from_split(tasks, 5, split_path=split, search_seed=8)
+    assert [first.batch(i) for i in range(6)] == [again.batch(i) for i in range(6)]
+    assert [first.batch(i) for i in range(6)] != [other.batch(i) for i in range(6)]
 
 
 @pytest.mark.parametrize("role", ("audit", "val", "test"))
@@ -590,7 +623,7 @@ def test_three_searches_reach_true_top_three_and_pruning_has_a_larger_gap(
         path = run_optimizer(optimizer, executor, tasks, runs_dir=tmp_path / "runs", split_path=split)
         learned = optimizer.incumbent()
         gaps[policy] = optimum - ParallelLandscape.quality(learned) / 24
-        if policy is not AgentPrune:
+        if policy is not PruneFromDense:
             assert learned.exec_hash in top_three, (policy.name, seed, str(learned))
         else:
             assert len({g for row in rows(path) for g in row["candidates"]}) <= 7
@@ -598,4 +631,4 @@ def test_three_searches_reach_true_top_three_and_pruning_has_a_larger_gap(
         assert optimizer.budget.spent_tokens == sum(
             result.prompt_tokens + result.gen_tokens
             for _, _, _, results in executor.batches for result in results)
-    assert gaps[AgentPrune] > gaps[RandomSearch]
+    assert gaps[PruneFromDense] > gaps[RandomSearch]

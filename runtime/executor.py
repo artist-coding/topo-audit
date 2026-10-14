@@ -58,6 +58,17 @@ class EvalResult(NamedTuple):
     gen_tokens: int
 
 
+class CacheMiss(LookupError):
+    """A replay-only Executor was asked for a cell the tensor does not hold."""
+
+    def __init__(self, key: tuple, split_role: str):
+        model, exec_hash, task_id, seed, repeat = key
+        super().__init__(
+            f"replay-only: no cached run for exec_hash={exec_hash[:12]} "
+            f"task={task_id} split={split_role} seed={seed} repeat={repeat}")
+        self.key = key
+
+
 class ExecutionError(RuntimeError):
     """An audited failure, never returned as a fabricated optimizer evaluation."""
 
@@ -99,7 +110,8 @@ def _write_json(path: Path, payload: dict) -> None:
 class Executor:
     def __init__(self, endpoint: Endpoint, cache: RunCache, *, max_tokens_per_node: int,
                  temperature: float, train_repeats: int, runs_dir: str | Path = "runs",
-                 prompts_dir: str | Path | None = None, sample_seed: int = 0):
+                 prompts_dir: str | Path | None = None, sample_seed: int = 0,
+                 replay_only: bool = False):
         if max_tokens_per_node < 1 or train_repeats < 1:
             raise ValueError("token cap and train_repeats must be positive")
         if not math.isfinite(temperature) or temperature < 0:
@@ -112,6 +124,7 @@ class Executor:
         if type(sample_seed) is not int or sample_seed < 0:
             raise ValueError("sample_seed must be a nonnegative integer")
         self._sample_seed = sample_seed
+        self._replay_only = bool(replay_only)
         self._output_dir = Path(runs_dir) / self.exp / "outputs"
         prompt_root = (Path(prompts_dir) if prompts_dir is not None
                        else Path(__file__).resolve().parents[1] / "prompts")
@@ -148,6 +161,18 @@ class Executor:
         return self._train_repeats
 
     @property
+    def replay_only(self) -> bool:
+        """Refuse to call the endpoint; a cache miss is an error instead.
+
+        Turned on for optimizer sweeps after the tensor is built. "Every seed replays
+        for free" is otherwise only a verbal claim: a bug in the repeat allocator, a
+        changed prompt, or a graph outside the tensor would quietly commission new
+        generations and inflate the bill by multiples. With this on, that becomes a
+        loud failure naming the missing cell.
+        """
+        return self._replay_only
+
+    @property
     def sample_seed(self) -> int:
         """Identity of the tensor's sample set, and part of every cache key.
 
@@ -174,6 +199,8 @@ class Executor:
             cached = self.cache.get(key)
             if cached is not None:
                 return cached
+            if self._replay_only:
+                raise CacheMiss(key, task.split_role)
             return self._execute(topology, task, seed, repeat)
 
     def _execute(self, topology: Topology, task: Task, seed: int, repeat: int) -> RunRecord:

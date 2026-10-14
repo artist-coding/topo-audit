@@ -146,3 +146,35 @@ def test_search_seeds_draw_different_samples_from_the_tensor(tmp_path):
                 for task in tasks]
 
     assert repeats_drawn(0) != repeats_drawn(7)
+
+
+def test_replay_only_executor_refuses_to_commission_new_generations(tmp_path):
+    """Turns "every seed replays for free" from a claim into an enforced invariant."""
+    from data.loaders.math import Task
+    from runtime.cache import RunCache
+    from runtime.executor import CacheMiss, Executor
+    from space.s0 import S0_ROLES, declared_nodes
+    from space.topology import Topology
+    from tests.mock_endpoint import MockEndpoint
+
+    tasks = [Task(task_id="t0", family="math", split_role="train",
+                  prompt="P", answer="1", meta={})]
+    endpoint = MockEndpoint(tasks, success_rate=1.0, max_concurrency=1)
+    cache = RunCache(tmp_path / "c.sqlite", exp="replay")
+    topology = Topology.canonical(declared_nodes(S0_ROLES, endpoint.name),
+                                  [("n1", "n4")], space_id="s4")
+
+    builder = Executor(endpoint, cache, max_tokens_per_node=128, temperature=0.7,
+                       train_repeats=2, runs_dir=tmp_path / "runs")
+    builder.run(topology, tasks[0], builder.sample_seed, 0)
+    built = len(endpoint.calls)
+
+    replayer = Executor(endpoint, cache, max_tokens_per_node=128, temperature=0.7,
+                        train_repeats=2, runs_dir=tmp_path / "runs", replay_only=True)
+    assert replayer.replay_only
+    assert replayer.run(topology, tasks[0], replayer.sample_seed, 0) is not None
+    assert len(endpoint.calls) == built            # a hit costs nothing
+
+    with pytest.raises(CacheMiss, match="replay-only"):
+        replayer.run(topology, tasks[0], replayer.sample_seed, 1)
+    assert len(endpoint.calls) == built            # and a miss costs nothing either

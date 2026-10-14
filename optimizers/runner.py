@@ -1,4 +1,4 @@
-"""Pair search steps by committed task order, independently of search randomness.
+"""Pair search steps by committed task order, within one search seed.
 
 A step is one propose/evaluate/observe round (eight charged candidates for a full
 REINFORCE group). Every round is checkpointed, including singleton rounds and the
@@ -26,13 +26,31 @@ from runtime.executor import EvalResult, Executor
 
 @dataclass(frozen=True, slots=True)
 class TaskBatches:
+    """Deterministic minibatch sequence, shared across optimizers at the same seed.
+
+    Two axes, deliberately separated:
+
+    - `seed` is the committed data-split seed. It fixes the task order so the sequence
+      is reproducible from the repository alone.
+    - `search_seed` is the optimizer's seed. It must enter the sequence, because a
+      rerun of the whole study would draw different minibatches; holding the sequence
+      fixed across seeds removes that variation, makes the 20 incumbents more alike
+      than a real rerun, and so makes `frozen` verdicts more likely and the
+      seed-dimension interval too narrow.
+
+    Two optimizers at the *same* search seed still see identical batches, which is the
+    pairing the plateau test and the discriminability diagnostic rely on.
+    """
+
     tasks: tuple[Task, ...]
     tasks_per_eval: int
     seed: int
+    search_seed: int = 0
 
     @classmethod
     def from_split(cls, tasks: Sequence[Task], tasks_per_eval: int, *,
-                   split_path: str | Path | None = None) -> TaskBatches:
+                   split_path: str | Path | None = None,
+                   search_seed: int = 0) -> TaskBatches:
         if any(task.split_role != "train" for task in tasks):
             raise ValueError("optimizer batches accept training tasks only")
         path = (Path(split_path) if split_path is not None else
@@ -43,11 +61,12 @@ class TaskBatches:
         if (len(by_id) != len(tasks) or len(set(order)) != len(order)
                 or set(by_id) != set(order)):
             raise ValueError("tasks must match the committed training split exactly")
-        return cls(tuple(by_id[task_id] for task_id in order), tasks_per_eval, split["seed"])
+        return cls(tuple(by_id[task_id] for task_id in order), tasks_per_eval,
+                   split["seed"], search_seed)
 
     def __post_init__(self) -> None:
-        if type(self.seed) is not int:
-            raise ValueError("batch seed must be an integer")
+        if type(self.seed) is not int or type(self.search_seed) is not int:
+            raise ValueError("batch seeds must be integers")
         if (type(self.tasks_per_eval) is not int
                 or not 1 <= self.tasks_per_eval <= len(self.tasks)):
             raise ValueError("tasks_per_eval must fit the training split without duplicates")
@@ -61,7 +80,8 @@ class TaskBatches:
             raise ValueError("step must be a nonnegative integer")
         # Hash ranking avoids dependence even on a local RNG's consumption history.
         def priority(index: int) -> bytes:
-            identity = (self.seed, step, index, self.tasks[index].task_id)
+            identity = (self.seed, self.search_seed, step, index,
+                        self.tasks[index].task_id)
             return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).digest()
 
         indices = sorted(range(len(self.tasks)), key=priority)[:self.tasks_per_eval]
@@ -105,7 +125,8 @@ def run_optimizer(optimizer: Optimizer, executor: Executor, tasks: Sequence[Task
     Executor is required for each optimizer/seed run to isolate its hit counters.
     """
     batches = TaskBatches.from_split(tasks, optimizer.budget.tasks_per_eval,
-                                     split_path=split_path)
+                                     split_path=split_path,
+                                     search_seed=optimizer.seed)
     if type(repeat_hint) is not int or repeat_hint < 0:
         raise ValueError("repeat_hint must be a nonnegative integer")
     if optimizer.budget.spent_evals or optimizer.budget.spent_tokens:

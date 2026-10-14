@@ -15,9 +15,8 @@ Two readings of the same numbers, and the second is the one that drives decision
 
     O + Delta_gen = P(G_hat_N) - P(G_learned)
 
-So the four terms are three adjacent gaps on one chain of population quantities,
-P(pi_single) <= P(G_learned) <= P(G_hat_N) <= P(G_star), and each gap maps to exactly
-one action:
+So the four terms are three adjacent gaps on a chain of population quantities, and
+each gap maps to an action:
 
     P(G_star)   - P(G_hat_N)   = E              -> add tasks
     P(G_hat_N)  - P(G_learned) = O + Delta_gen  -> keep searching
@@ -29,6 +28,23 @@ reported separately because it is what the optimizer itself can see, which is wh
 discriminability hypothesis is about. The ladder is also why the main figure plots four
 levels rather than a stack of signed terms: no sign confusion, and the identity closes
 by construction.
+
+**The chain is not an inequality.** Only
+``Phat_N(G_learned) <= Phat_N(G_hat_N)`` is guaranteed, and that is a *training*
+statement -- it is what makes O non-negative. In population terms the order can
+invert, and two of the inversions are substantive rather than pathological:
+
+- ``P(G_learned) > P(G_hat_N)``, so `search_value` is negative. The learner declined
+  to follow an argmax that had overfitted the training split. Reading the ladder
+  naively would prescribe "keep searching", which pushes it toward the *worse* graph.
+- ``P(G_learned) > P(pi_single)`` failing, so C is negative: the space loses to the
+  declared single-agent reference at matched compute. That is a legitimate finding,
+  not a bug.
+
+So E is only actionable while there is something to be gained by searching better.
+:func:`prescribe` encodes that: when `search_value`'s interval contains zero or sits
+below it, the learner is already at or past the empirical maximiser and the decision
+must read ``P(G_star) - P(G_learned)`` directly instead of E.
 
 **Selection bias is unavoidable, so it is reported rather than assumed away.**
 Even an exhaustively enumerable space yields only the best graph *on a finite audit
@@ -52,7 +68,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
+
+if TYPE_CHECKING:  # avoids a cycle: bootstrap imports nothing from here
+    from analysis.bootstrap import Interval
 
 import numpy as np
 
@@ -321,6 +340,76 @@ def decompose_trajectory(
                 train=train, test=test, g_star=g_star, g_hat_n=g_hat_n,
                 p_single=p_single))
     return rows
+
+
+def prescribe(capacity: "Interval", estimation: "Interval",
+              search_value: "Interval", gap_to_optimum: "Interval",
+              epsilon: float) -> dict:
+    """Map the measured intervals to one action.
+
+    Four intervals, because the discriminating quantity is the gap to the space
+    optimum rather than any single term:
+
+        gap_to_optimum = E + search_value = P(G_star) - P(G_learned)
+
+    It is passed in rather than derived because E and search_value are correlated, so
+    their sum needs its own paired resample.
+
+    The reading this guards against: "whichever term is largest wins". When the
+    learner has declined an argmax that overfitted the training split,
+    `search_value` is negative and E can be large while the gap is nearly closed --
+    the learner is already at P(G_star). Prescribing "add tasks" there chases a target
+    the search is not using, and "keep searching" would move it backwards.
+    """
+    if capacity.high <= epsilon:
+        return _decision(
+            "stop_or_enlarge_space",
+            f"capacity tops out at {capacity.high:+.3f} <= epsilon={epsilon}: "
+            "nothing in this space is worth reaching",
+            capacity, estimation, search_value, gap_to_optimum)
+
+    if gap_to_optimum.high <= epsilon:
+        return _decision(
+            "stop_space_delivered",
+            f"the gap to the space optimum is bounded by {gap_to_optimum.high:+.3f} "
+            f"<= epsilon={epsilon}: the learner already has what this space offers, "
+            f"so the plateau is this space's ceiling",
+            capacity, estimation, search_value, gap_to_optimum)
+
+    if search_value.low > 0.0:
+        return _decision(
+            "keep_searching",
+            f"a perfect search on the same data would add {search_value.point:+.3f} "
+            f"[{search_value.low:+.3f}, {search_value.high:+.3f}]",
+            capacity, estimation, search_value, gap_to_optimum)
+
+    if estimation.low > 0.0:
+        return _decision(
+            "add_tasks",
+            f"searching harder is not it (search_value {search_value.point:+.3f}), "
+            f"but {gap_to_optimum.point:+.3f} of gap remains and E is "
+            f"{estimation.point:+.3f}: the loss is in selecting on too few tasks",
+            capacity, estimation, search_value, gap_to_optimum)
+
+    return _decision(
+        "inconclusive",
+        "a gap remains but neither searching nor more tasks has a positive lower "
+        "bound; widen the intervals before acting",
+        capacity, estimation, search_value, gap_to_optimum)
+
+
+def _decision(action: str, why: str, capacity: "Interval", estimation: "Interval",
+              search_value: "Interval", gap_to_optimum: "Interval") -> dict:
+    searching_helps = search_value.low > 0.0
+    return {
+        "action": action,
+        "why": why,
+        "searching_helps": searching_helps,
+        "learner_at_or_past_empirical_max": search_value.high <= 0.0,
+        # E describes a target the search is not using unless a gap actually remains.
+        "estimation_actionable": estimation.low > 0.0 and gap_to_optimum.low > 0.0,
+        "gap_to_space_optimum": gap_to_optimum.as_dict(),
+    }
 
 
 def ladder_levels(rows: Sequence[Decomposition]) -> dict:
