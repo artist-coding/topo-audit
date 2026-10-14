@@ -19,13 +19,29 @@ Two cases that look identical in a learning curve and mean different things:
 They are reported separately. Collapsing them is how a search that merely got stuck
 gets written up as a ceiling.
 
-**Power.** With binary scores the paired standard error is sqrt(q/n) where q is the
-fraction of validation tasks on which the two incumbents disagree, so resolution is
-set by disagreement, not by accuracy. On 300 validation tasks with q ~ 0.2 and five
-seeds, the one-sided upper bound sits near 2.7 points even when the true improvement
-is zero -- which is why epsilon was raised to 2.0 and the seed count to 50 rather than
-widening the validation split: seeds are free under tensor replay and they shrink the
-component that dominates.
+**Power, and the error that was in it.** With binary scores the paired standard error
+is sqrt(q(1-q)/n) where q is the fraction of validation tasks on which the two
+incumbents disagree, so resolution is set by disagreement, not by accuracy.
+
+An earlier version divided by n_tasks * n_seeds, which assumes each seed contributes
+independent task noise. It does not. Every seed is scored on the *same* validation
+split, and in the regime that matters -- a plateau, where the searches have converged
+-- most seeds hold the *same* pair of incumbents, so averaging over seeds averages
+one number repeatedly. Simulated at 300 tasks with a true improvement of zero:
+
+    seeds   all seeds share a pair      seeds have independent pairs
+       20   3.03 (q=.1) 3.88 (q=.2)     1.15 (q=.1) 1.56 (q=.2)
+       50   2.92         4.14           0.74         1.03
+
+The floor, 1.645*sqrt(q(1-q)/n_tasks), is 2.85 points at q=0.1 and 3.80 at q=0.2
+regardless of seed count. So epsilon = 2.0 on 300 tasks cannot be excluded in the
+converged case; it needs roughly 1,100 validation tasks at q=0.2, or epsilon near 4.
+:func:`power_report` now reports the floor and judges sufficiency against it, and the
+measured q should come from a pilot rather than an assumption.
+
+Note that :func:`assess_plateau` itself was never wrong: it resamples the observed
+diffs matrix, so identical seed rows widen the interval on their own. Only the
+pre-registration arithmetic was optimistic.
 """
 
 from __future__ import annotations
@@ -188,21 +204,38 @@ def first_plateau(verdicts: Sequence[PlateauVerdict]) -> PlateauVerdict | None:
 
 @dataclass(frozen=True, slots=True)
 class PowerReport:
+    """Two bounds, because which one applies depends on seed diversity.
+
+    `floor` assumes every seed converged to the same pair of incumbents, so seeds buy
+    nothing. `optimistic` assumes each seed holds an independent pair. A plateau is by
+    definition the converged case, so `sufficient` is judged against the floor.
+    """
+
     epsilon: float
     disagreement: float
     n_tasks: int
     n_seeds: int
-    expected_upper_bound: float
+    floor_upper_bound: float
+    optimistic_upper_bound: float
     sufficient: bool
-    tasks_needed_per_seed: int
+    tasks_needed: int
+
+    @property
+    def expected_upper_bound(self) -> float:
+        """The bound to design against: seeds cannot be assumed to help."""
+        return self.floor_upper_bound
 
     def as_dict(self) -> dict:
         return {
             "epsilon": self.epsilon, "disagreement": self.disagreement,
             "n_tasks": self.n_tasks, "n_seeds": self.n_seeds,
-            "expected_upper_bound": self.expected_upper_bound,
+            "floor_upper_bound": self.floor_upper_bound,
+            "optimistic_upper_bound": self.optimistic_upper_bound,
             "sufficient": self.sufficient,
-            "tasks_needed_per_seed": self.tasks_needed_per_seed,
+            "tasks_needed": self.tasks_needed,
+            "note": ("floor assumes all seeds share one incumbent pair, which is the "
+                     "converged regime a plateau test runs in; optimistic assumes "
+                     "independent pairs per seed"),
         }
 
 
@@ -210,18 +243,23 @@ def power_report(epsilon: float, disagreement: float, n_tasks: int, n_seeds: int
                  *, level: float = 0.95) -> PowerReport:
     """Can this design exclude `epsilon` at all?
 
-    Run before committing epsilon to the pre-registration: if the expected upper bound
-    under a true improvement of zero already exceeds epsilon, the test can never
-    declare a plateau and the design has to change, not the interpretation.
+    Run before committing epsilon to the pre-registration: if the bound under a true
+    improvement of zero already exceeds epsilon, the test can never declare a plateau
+    and the design has to change, not the interpretation.
+
+    Seeds enter the optimistic bound only. They cannot enter the floor, because a
+    plateau is the regime where searches have converged onto the same incumbents and
+    averaging across seeds then averages one number repeatedly.
     """
     z = {0.90: 1.2816, 0.95: 1.6449, 0.99: 2.3263}.get(level, 1.6449)
-    se = float(np.sqrt(disagreement / (n_tasks * max(n_seeds, 1))))
-    upper = z * se
+    variance = max(disagreement * (1.0 - disagreement), 1e-12)
+    floor = z * float(np.sqrt(variance / max(n_tasks, 1)))
+    optimistic = z * float(np.sqrt(variance / (max(n_tasks, 1) * max(n_seeds, 1))))
     return PowerReport(
         epsilon=epsilon, disagreement=disagreement, n_tasks=n_tasks, n_seeds=n_seeds,
-        expected_upper_bound=upper, sufficient=upper < epsilon,
-        tasks_needed_per_seed=required_tasks(epsilon, disagreement, level=level,
-                                             n_seeds=n_seeds))
+        floor_upper_bound=floor, optimistic_upper_bound=optimistic,
+        sufficient=floor < epsilon,
+        tasks_needed=required_tasks(epsilon, disagreement, level=level))
 
 
 def observed_disagreement(val_rows: Mapping[str, np.ndarray],

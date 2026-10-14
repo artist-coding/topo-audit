@@ -10,8 +10,10 @@ Two levels of resampling, because the quantities have two sources of noise:
 
 - **tasks**, for anything that compares fixed graphs (C, E, and the levels);
 - **tasks and seeds**, for anything involving the learned graph, since each seed stops
-  at a different incumbent. The seed component is usually the larger of the two and it
-  is the reason 5 seeds cannot support a 1-point epsilon while 50 seeds can.
+  at a different incumbent -- but only while they *do* stop in different places. Once
+  the searches converge, every seed holds the same pair and resampling seeds adds
+  nothing, so the task term is the floor. :func:`required_tasks` takes no seed count
+  for exactly this reason.
 
 A caveat that must travel with these intervals: seeds share tensor samples (the repeat
 allocator recycles cells once the R draws per cell are used up), so the seed-level
@@ -143,18 +145,20 @@ def disagreement_rate(left: np.ndarray, right: np.ndarray) -> float:
 
 
 def required_tasks(epsilon: float, disagreement: float, *,
-                   level: float = 0.95, n_seeds: int = 1) -> int:
-    """Paired observations needed before `epsilon` can be excluded.
+                   level: float = 0.95) -> int:
+    """Validation tasks needed before `epsilon` can be excluded.
 
-    Inverts the one-sided bound mean + z * sqrt(q / n) < epsilon at mean = 0. The
-    n_seeds factor assumes independent seeds, which recycled samples make optimistic;
-    treat the result as a floor.
+    Inverts the one-sided bound z * sqrt(q(1-q)/n) < epsilon at a true improvement of
+    zero. Deliberately takes no seed count: in the converged regime a plateau test
+    runs in, every seed holds the same pair of incumbents and is scored on the same
+    split, so averaging over seeds does not reduce this noise. An earlier version
+    divided by the seed count and understated the requirement by 3-7x.
     """
     if epsilon <= 0 or not 0 < disagreement <= 1:
         raise ValueError("epsilon must be positive and disagreement in (0, 1]")
     z = {0.90: 1.2816, 0.95: 1.6449, 0.99: 2.3263}.get(level, 1.6449)
-    per_seed = (z * z * disagreement) / (epsilon * epsilon)
-    return int(math.ceil(per_seed / max(n_seeds, 1)))
+    variance = disagreement * (1.0 - disagreement)
+    return int(math.ceil((z * z * variance) / (epsilon * epsilon)))
 
 
 def repeat_variance(values: np.ndarray) -> float:

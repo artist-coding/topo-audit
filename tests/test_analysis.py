@@ -37,6 +37,7 @@ from analysis.decompose import (
     decompose_trajectory,
     ladder_levels,
     mixed_star_residual,
+    prescribe,
     select_g_hat_n,
     select_g_star_plugin,
 )
@@ -225,8 +226,17 @@ def test_required_tasks_scales_with_the_inverse_square_of_epsilon():
     assert many == pytest.approx(4 * few, rel=0.02)
 
 
-def test_required_tasks_divides_by_seed_count():
-    assert required_tasks(0.02, 0.2, n_seeds=50) < required_tasks(0.02, 0.2, n_seeds=5)
+def test_required_tasks_ignores_seed_count():
+    """Seeds cannot buy task-level precision in the converged regime.
+
+    The earlier version of this test asserted the opposite and encoded the bug: it
+    divided the requirement by the seed count, which understated it by 3-7x.
+    """
+    import inspect
+
+    assert "n_seeds" not in inspect.signature(required_tasks).parameters
+    # Excluding 2 points at q=0.2 needs ~1,100 tasks, not ~22 as 50 seeds implied.
+    assert 1_000 <= required_tasks(0.02, 0.2) <= 1_200
 
 
 def test_interval_disjointness_is_the_e0_criterion():
@@ -294,25 +304,42 @@ def test_scan_reports_the_first_declared_step():
 
 # ----------------------------------------------------------------------- power
 
-def test_epsilon_of_one_point_is_unreachable_at_five_seeds():
-    """The measured reason epsilon was raised from 1.0 to 2.0 points."""
+def test_epsilon_of_one_point_is_unreachable_at_150_tasks():
     report = power_report(epsilon=0.01, disagreement=0.2, n_tasks=150, n_seeds=5)
     assert not report.sufficient
-    assert report.expected_upper_bound > 0.01
+    assert report.floor_upper_bound > 0.01
 
 
-def test_fifty_seeds_make_two_points_reachable():
-    report = power_report(epsilon=0.02, disagreement=0.2, n_tasks=300, n_seeds=50)
-    assert report.sufficient
-    assert report.expected_upper_bound < 0.02
+def test_seeds_do_not_move_the_floor():
+    """A plateau is the converged regime, where every seed holds the same pair.
+
+    Simulation at 300 tasks, true improvement zero: the bootstrap's 95% upper bound is
+    3.88 points at 20 seeds and 4.14 at 50 when seeds share a pair, against a formula
+    that claimed 0.95 and 0.60. The floor is what the design must clear.
+    """
+    few = power_report(0.02, 0.2, n_tasks=300, n_seeds=5)
+    many = power_report(0.02, 0.2, n_tasks=300, n_seeds=50)
+    assert few.floor_upper_bound == pytest.approx(many.floor_upper_bound)
+    assert many.optimistic_upper_bound < many.floor_upper_bound
+    assert not many.sufficient      # 3.8 points of floor against a 2-point epsilon
 
 
-def test_seeds_shrink_the_bound_faster_than_the_split_widens_it():
-    """Why 50 seeds beat a wider validation split: both enter as n*seeds."""
-    more_seeds = power_report(0.02, 0.2, n_tasks=150, n_seeds=50)
-    wider_split = power_report(0.02, 0.2, n_tasks=1500, n_seeds=5)
-    assert more_seeds.expected_upper_bound == pytest.approx(
-        wider_split.expected_upper_bound, rel=1e-6)
+def test_two_points_needs_about_eleven_hundred_tasks():
+    assert not power_report(0.02, 0.2, n_tasks=300, n_seeds=20).sufficient
+    assert power_report(0.02, 0.2, n_tasks=1200, n_seeds=20).sufficient
+
+
+def test_floor_matches_the_closed_form():
+    report = power_report(0.02, 0.2, n_tasks=300, n_seeds=20)
+    expected = 1.6449 * np.sqrt(0.2 * 0.8 / 300)
+    assert report.floor_upper_bound == pytest.approx(expected, rel=1e-3)
+    assert report.floor_upper_bound == pytest.approx(0.038, abs=0.002)
+
+
+def test_widening_the_split_is_the_only_lever_on_the_floor():
+    narrow = power_report(0.02, 0.2, n_tasks=300, n_seeds=50)
+    wide = power_report(0.02, 0.2, n_tasks=1200, n_seeds=5)
+    assert wide.floor_upper_bound < narrow.floor_upper_bound
 
 
 def test_discriminability_reports_gap_and_noise_without_a_threshold():
@@ -349,3 +376,64 @@ def test_ladder_levels_move_only_the_learned_line():
     assert ladder["p_learned"] == [pytest.approx(0.65), pytest.approx(0.66)]
     assert ladder["p_star"] == pytest.approx(0.68)
     assert ladder["p_single"] == pytest.approx(0.60)
+
+
+# ------------------------------------------------------- the inversion branch (#3)
+
+def _iv(point: float, low: float, high: float) -> Interval:
+    return Interval(point=point, low=low, high=high)
+
+
+def test_prescribe_keeps_searching_when_search_value_is_positive():
+    out = prescribe(capacity=_iv(0.08, 0.05, 0.11), estimation=_iv(0.02, 0.00, 0.04),
+                    search_value=_iv(0.03, 0.01, 0.05),
+                    gap_to_optimum=_iv(0.05, 0.03, 0.07), epsilon=0.02)
+    assert out["action"] == "keep_searching"
+    assert out["searching_helps"]
+
+
+def test_prescribe_does_not_prescribe_adding_tasks_when_the_gap_is_closed():
+    """The failure the naive 'largest term wins' reading produces.
+
+    search_value = -E means the learner declined an argmax that had overfitted the
+    training split, and E + search_value = 0, so it already sits at P(G_star). E is
+    large and completely unactionable.
+    """
+    out = prescribe(capacity=_iv(0.08, 0.05, 0.11), estimation=_iv(0.05, 0.03, 0.07),
+                    search_value=_iv(-0.05, -0.07, -0.03),
+                    gap_to_optimum=_iv(0.00, -0.01, 0.01), epsilon=0.02)
+    assert out["action"] == "stop_space_delivered"
+    assert out["learner_at_or_past_empirical_max"]
+    assert not out["estimation_actionable"]
+
+
+def test_prescribe_adds_tasks_when_search_is_exhausted_but_a_gap_remains():
+    out = prescribe(capacity=_iv(0.10, 0.07, 0.13), estimation=_iv(0.06, 0.04, 0.08),
+                    search_value=_iv(-0.01, -0.03, 0.01),
+                    gap_to_optimum=_iv(0.05, 0.03, 0.07), epsilon=0.02)
+    assert out["action"] == "add_tasks"
+    assert out["estimation_actionable"]
+    assert not out["searching_helps"]
+
+
+def test_prescribe_stops_when_capacity_cannot_clear_epsilon():
+    out = prescribe(capacity=_iv(0.01, -0.01, 0.015), estimation=_iv(0.05, 0.03, 0.07),
+                    search_value=_iv(0.04, 0.02, 0.06),
+                    gap_to_optimum=_iv(0.09, 0.07, 0.11), epsilon=0.02)
+    assert out["action"] == "stop_or_enlarge_space"
+    assert "epsilon" in out["why"]
+
+
+def test_prescribe_handles_a_negative_capacity():
+    """C < 0 is a finding -- the space loses to pi_single at matched compute."""
+    out = prescribe(capacity=_iv(-0.03, -0.05, -0.01), estimation=_iv(0.01, 0.0, 0.02),
+                    search_value=_iv(0.01, 0.0, 0.02),
+                    gap_to_optimum=_iv(0.02, 0.0, 0.04), epsilon=0.02)
+    assert out["action"] == "stop_or_enlarge_space"
+
+
+def test_prescribe_is_inconclusive_rather_than_guessing():
+    out = prescribe(capacity=_iv(0.10, 0.07, 0.13), estimation=_iv(0.02, -0.01, 0.05),
+                    search_value=_iv(0.01, -0.02, 0.04),
+                    gap_to_optimum=_iv(0.05, 0.02, 0.08), epsilon=0.02)
+    assert out["action"] == "inconclusive"

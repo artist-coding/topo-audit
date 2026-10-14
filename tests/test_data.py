@@ -163,3 +163,73 @@ def test_every_task_has_an_answer_and_a_level(splits):
 
 def test_task_id_is_stable_under_whitespace():
     assert task_id_for("  2+2=? ") == task_id_for("2+2=?")
+
+
+# --------------------------------------------- the scorer must be time-bounded (#8)
+
+def test_scorer_is_bounded_on_adversarial_latex():
+    """score_output runs once per tensor cell, so it may never run unbounded.
+
+    Measured failure: a generation containing a LaTeX relation sent sympy's
+    parse_latex into Relational.__new__ -> is_eq -> evalf_integral -> mpmath
+    quadrature *inside the parser*, and a probe burned 43 minutes of CPU with no
+    progress. The grammar is now restricted until evaluation is bounded by
+    construction -- no subprocess, no timeout, nothing that can loop.
+    """
+    import time
+
+    from data.loaders.math import _latex_to_arithmetic
+
+    adversarial = [
+        r"\int_0^1 \frac{\sin(x^x)}{\log(1+x^{1/3})}\,dx = \frac{\pi}{4}",
+        r"\sum_{n=1}^\infty \frac{1}{n^s} < \infty",
+        r"\lim_{x\to 0}\frac{\tan(\sin x)-\sin(\tan x)}{x^7}",
+        r"x = \oint_C \frac{dz}{z^2+1}",
+        r"\begin{cases} 1 & x>0 \\ 0 & x\le 0 \end{cases}",
+    ]
+    started = time.monotonic()
+    for text in adversarial:
+        assert _latex_to_arithmetic(text) is None, f"should reject {text[:34]!r}"
+        assert score_output(f"FINAL: {text}", "1").score == 0.0
+    assert time.monotonic() - started < 0.5
+
+
+def test_restricted_grammar_still_decides_what_it_exists_for():
+    """The three equivalences that motivated a fallback at all."""
+    assert answers_match("0.5", r"\frac{1}{2}")
+    assert answers_match("2/4", r"\frac{1}{2}")
+    assert answers_match(r"\frac{\sqrt{13}+1}{2}", r"\frac{1 + \sqrt{13}}{2}")
+    assert not answers_match("0.6", r"\frac{1}{2}")
+
+
+def test_symbolic_answers_are_handled_by_normalisation_not_evaluation():
+    from data.loaders.math import _latex_to_arithmetic
+
+    assert _latex_to_arithmetic("8n^2+4n+1") is None   # has a free symbol
+    assert answers_match("8n^2+4n+1", "8n^2 + 4n + 1")  # but normalises equal
+
+
+def test_evaluator_admits_only_arithmetic():
+    from data.loaders.math import _evaluate
+
+    assert _evaluate("((1)/(2))") == pytest.approx(0.5)
+    assert _evaluate("pi") == pytest.approx(3.14159, abs=1e-4)
+    assert _evaluate("__import__('os').system('true')") is None
+    assert _evaluate("open('x')") is None
+    assert _evaluate("1/0") is None
+
+
+def test_long_answers_are_rejected_before_parsing():
+    from data.loaders.math import _NUMERIC_MAX_CHARS, _latex_to_arithmetic
+
+    assert _latex_to_arithmetic("1+" * _NUMERIC_MAX_CHARS) is None
+
+
+def test_repeated_comparisons_are_cached():
+    from data.loaders.math import _numerically_equal
+
+    _numerically_equal.cache_clear()
+    _numerically_equal("2/4", r"\frac{1}{2}")
+    before = _numerically_equal.cache_info().hits
+    _numerically_equal("2/4", r"\frac{1}{2}")
+    assert _numerically_equal.cache_info().hits == before + 1

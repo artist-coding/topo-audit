@@ -1,4 +1,10 @@
-"""A deliberately narrow, monotone AgentPrune-style search path.
+"""Prune-from-dense: a deliberately narrow, monotone edge-removal search path.
+
+Named for what it does rather than for AgentPrune, which it is not. AgentPrune
+learns a continuous mask by policy gradient with a nuclear-norm penalty and then
+prunes by magnitude; here the executor returns black-box rewards, so there is no
+gradient to take through a soft edge. The paper cites AgentPrune as the source of
+the "start dense, remove edges" idea and reports this as prune-from-dense.
 
 Only about one graph per prune round is visited. Its empirical optimization gap can
 therefore be much larger than random search's; adding exploration would erase the
@@ -9,8 +15,8 @@ The executor supplies black-box rewards, not derivatives through soft edges. We 
 an online linear reward surrogate to the visited binary masks with L1 shrinkage of
 its continuous edge weights, then remove the smallest absolute weight. Co-occurring
 edges are not individually identifiable along this path; seeded initial weights
-break that symmetry. This is a limited AgentPrune-style surrogate, not a claim of
-recovering edge-level causal effects or differentiating through endpoint calls.
+break that symmetry. This is a limited surrogate, not a claim of recovering edge-level causal
+effects or of differentiating through endpoint calls.
 
 The brief supplies no separate mask hyperparameters. Defaults reuse the committed
 edge learner's lr and regularisation scale; both can be explicitly overridden.
@@ -27,8 +33,8 @@ from runtime.executor import EvalResult
 from space.topology import Topology
 
 
-class AgentPrune(SearchOptimizer):
-    name = "agentprune"
+class PruneFromDense(SearchOptimizer):
+    name = "prune_from_dense"
 
     def __init__(self, space: Sequence[Topology], budget: Budget, seed: int, *,
                  lr: float | None = None, magnitude_reg: float | None = None):

@@ -33,7 +33,8 @@ splits:
   train: 256
   audit: 300
   val: 300                       # 150 -> 300：平台期检验的题目分量
-  test: 500
+  test: 1000                     # 与 data/splits/math_v1.json 一致：
+                                 # 1000 道，含全部 262 道 MATH-500 L4-5 作社区可比锚点
 
 tensor:
   repeats:
@@ -47,11 +48,16 @@ tensor:
   # Plain hash % R can collide on consecutive equivalent masks.
   repeat_index: hash_then_linear_probe(seed, exec_hash, task_id, hit_index, repeats.train)
 
-optimizers: [random_search, reinforce_edge, agentprune, greedy_local]
+# prune_from_dense 不叫 agentprune：AgentPrune 用策略梯度学连续掩码 + 核范数惩罚，
+# 这里执行器只给黑箱奖励、没有可导的软边，只共享“从稠密图逐边剪”这一个想法。
+optimizers: [random_search, reinforce_edge, prune_from_dense, greedy_local]
 
 budget:
   max_evals: 200
   tasks_per_eval: 24
+  # 张量建好后，优化器扫描应当无法调用端点：缓存未命中直接报错。
+  # 否则"种子免费重放"只是口头承诺，repeat 分配一有 bug 就悄悄烧算力。
+  replay_only: true
   checkpoints: every_step        # 重放免费，不必只在 [25,50,100,150,200]
   report_at: [25, 200]           # 正文引用的两个点：约等于空间大小、以及给足预算
 

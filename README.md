@@ -55,7 +55,7 @@ P(pi_single)─── 等 token 预算下最强的单智能体
 | [`space/`](space/) | Topology、剪枝、规范化、双身份 hash、S₀/S₁ 枚举 |
 | [`data/`](data/) | MATH / DeepMath 加载、boxed 打分、固定种子四角色划分 |
 | [`runtime/`](runtime/) | 端点客户端、执行器、SQLite 缓存、token 记账、π_single |
-| [`optimizers/`](optimizers/) | 随机搜索、边级 REINFORCE、AgentPrune 式剪枝、贪心局部搜索 |
+| [`optimizers/`](optimizers/) | 随机搜索、边级 REINFORCE、prune_from_dense、贪心局部搜索 |
 | [`audit/`](audit/) | 建得分张量 |
 | [`analysis/`](analysis/) | 四项分解、交叉拟合、bootstrap、平台期检验、报告 |
 
