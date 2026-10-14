@@ -44,6 +44,8 @@ def main() -> None:
     ap.add_argument("--cap", type=int, default=16384)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--models", nargs="*", default=["DeepSeek"])
+    ap.add_argument("--bands", type=float, nargs="*", default=None,
+                    help="band lower bounds; each spans +0.5 (e.g. 8.5 -> [8.5, 9.0])")
     args = ap.parse_args()
 
     pool = pd.read_parquet(RAW)
@@ -51,8 +53,9 @@ def main() -> None:
     pool = pool.drop_duplicates(subset="task_id")
     rng = np.random.default_rng(20261014)
 
+    bands = ([(low, low + 0.5) for low in args.bands] if args.bands else BANDS)
     jobs = []
-    for low, high in BANDS:
+    for low, high in bands:
         band = pool[(pool["difficulty"] >= low) & (pool["difficulty"] <= high)]
         if len(band) < args.per_band:
             print(f"  band [{low}, {high}] has only {len(band)} problems, skipping")
@@ -60,7 +63,7 @@ def main() -> None:
         picked = band.iloc[rng.permutation(len(band))[:args.per_band]]
         for model in args.models:
             jobs += [(model, low, row) for row in picked.itertuples()]
-    print(f"{len(jobs)} calls: {len(BANDS)} bands x {args.per_band} problems "
+    print(f"{len(jobs)} calls: {len(bands)} bands x {args.per_band} problems "
           f"x {len(args.models)} model(s)", flush=True)
 
     def work(job):
@@ -91,7 +94,7 @@ def main() -> None:
           f"{'pfail':>6s} {'gen_med':>8s} {'gen_p90':>8s} "
           + " ".join(f"tr@{c}" for c in caps) + "  gate")
     for model in args.models:
-        for low, _ in BANDS:
+        for low, _ in bands:
             rs = [r for r in rows if r["model"] == model and r["band"] == low]
             ok = [r for r in rs if "error" not in r]
             if not ok:
