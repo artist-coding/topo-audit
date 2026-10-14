@@ -84,3 +84,65 @@ def test_repeat_cube_drops_repeats_beyond_the_declared_count():
     records = [_record("g1", "t1", 1.0, repeat=9, split_role="train")]
     _, _, cube = repeat_cube(records, "train", repeats=2)
     assert np.all(np.isnan(cube))
+
+
+# ---------------------------------------------- one tensor must serve every seed
+
+def test_search_seeds_share_the_tensor(tmp_path):
+    """The premise the whole budget rests on.
+
+    A tensor cell is one LLM draw for (exec_hash, task, repeat). With the search seed
+    in the cache key, 49 of 50 seeds miss every cell and the optimizer sweep costs
+    8.7x the tensor; with it out, the sweep is free.
+    """
+    from data.loaders.math import Task
+    from runtime.cache import RunCache
+    from runtime.executor import Executor
+    from space.s0 import S0_ROLES, declared_nodes
+    from space.topology import Topology
+    from tests.mock_endpoint import MockEndpoint
+
+    tasks = [Task(task_id="t0", family="math", split_role="train",
+                  prompt="P", answer="1", meta={})]
+    endpoint = MockEndpoint(tasks, success_rate=1.0, max_concurrency=1)
+    cache = RunCache(tmp_path / "c.sqlite", exp="shared")
+    topology = Topology.canonical(declared_nodes(S0_ROLES, endpoint.name),
+                                  [("n1", "n4")], space_id="s4")
+
+    builder = Executor(endpoint, cache, max_tokens_per_node=128, temperature=0.7,
+                       train_repeats=8, runs_dir=tmp_path / "runs")
+    for repeat in range(8):
+        builder.run(topology, tasks[0], builder.sample_seed, repeat)
+    built = len(endpoint.calls)
+    assert built > 0
+
+    for seed in (0, 7, 23, 49):
+        searcher = Executor(endpoint, cache, max_tokens_per_node=128, temperature=0.7,
+                            train_repeats=8, runs_dir=tmp_path / "runs")
+        searcher.evaluate_batch([topology], tasks, seed=seed, repeat_hint=0)
+        assert len(endpoint.calls) == built, f"seed {seed} missed the tensor"
+
+
+def test_search_seeds_draw_different_samples_from_the_tensor(tmp_path):
+    """Sharing cells must not make two seeds see identical reward sequences."""
+    from data.loaders.math import Task
+    from runtime.cache import RunCache
+    from runtime.executor import Executor
+    from space.s0 import S0_ROLES, declared_nodes
+    from space.topology import Topology
+    from tests.mock_endpoint import MockEndpoint
+
+    tasks = [Task(task_id=f"t{i}", family="math", split_role="train",
+                  prompt=f"P{i}", answer="1", meta={}) for i in range(6)]
+    endpoint = MockEndpoint(tasks, success_rate=0.5, max_concurrency=1)
+    cache = RunCache(tmp_path / "c.sqlite", exp="draws")
+    topology = Topology.canonical(declared_nodes(S0_ROLES, endpoint.name),
+                                  [("n1", "n4")], space_id="s4")
+
+    def repeats_drawn(seed: int) -> list[int]:
+        executor = Executor(endpoint, cache, max_tokens_per_node=128, temperature=0.7,
+                            train_repeats=8, runs_dir=tmp_path / "runs")
+        return [executor._repeat_index(seed, topology.exec_hash, task.task_id, 0)
+                for task in tasks]
+
+    assert repeats_drawn(0) != repeats_drawn(7)

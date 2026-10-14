@@ -99,7 +99,7 @@ def _write_json(path: Path, payload: dict) -> None:
 class Executor:
     def __init__(self, endpoint: Endpoint, cache: RunCache, *, max_tokens_per_node: int,
                  temperature: float, train_repeats: int, runs_dir: str | Path = "runs",
-                 prompts_dir: str | Path | None = None):
+                 prompts_dir: str | Path | None = None, sample_seed: int = 0):
         if max_tokens_per_node < 1 or train_repeats < 1:
             raise ValueError("token cap and train_repeats must be positive")
         if not math.isfinite(temperature) or temperature < 0:
@@ -109,6 +109,9 @@ class Executor:
         self.endpoint, self.cache, self.exp = endpoint, cache, cache.exp
         self._max_tokens_per_node, self._temperature = max_tokens_per_node, temperature
         self._train_repeats = train_repeats
+        if type(sample_seed) is not int or sample_seed < 0:
+            raise ValueError("sample_seed must be a nonnegative integer")
+        self._sample_seed = sample_seed
         self._output_dir = Path(runs_dir) / self.exp / "outputs"
         prompt_root = (Path(prompts_dir) if prompts_dir is not None
                        else Path(__file__).resolve().parents[1] / "prompts")
@@ -143,6 +146,17 @@ class Executor:
     @property
     def train_repeats(self) -> int:
         return self._train_repeats
+
+    @property
+    def sample_seed(self) -> int:
+        """Identity of the tensor's sample set, and part of every cache key.
+
+        A tensor cell is one LLM draw for (exec_hash, task, repeat); which searcher
+        asked for it is not part of its identity. Keeping the optimizer's seed out of
+        the key is what lets one tensor serve every seed -- with it in, 49 of 50 seeds
+        miss every cell and the sweep costs 8.7x the tensor instead of nothing.
+        """
+        return self._sample_seed
 
     def run(self, topology: Topology, task: Task, seed: int, repeat: int) -> RunRecord:
         if repeat < 0:
@@ -284,9 +298,17 @@ class Executor:
                        seed: int, repeat_hint: int) -> list[EvalResult]:
         """Training scores only; repeat_hint is a lower bound on each hit counter.
 
-        Counters span calls and equivalent masks within this Executor. Replaying
-        an optimizer uses a fresh Executor and the same proposal/hint sequence;
-        run(..., repeat=...) provides stateless replay of an explicit tensor cell.
+        `seed` is the *search* seed. It decides which candidates were proposed and
+        which repeat index each hit draws, but it is deliberately absent from the
+        cache key: see :attr:`sample_seed`. Two searches at different seeds therefore
+        read different samples out of the same tensor rather than commissioning their
+        own, and their search randomness stays fully independent while the LLM
+        sampling noise is shared. That shared part is what `repeat_variance` in
+        analysis/bootstrap.py bounds.
+
+        Counters span calls and equivalent masks within this Executor. Replaying an
+        optimizer uses a fresh Executor and the same proposal/hint sequence;
+        run(..., repeat=...) replays an explicit tensor cell statelessly.
         """
         tasks = tuple(tasks)
         if any(task.split_role != "train" for task in tasks):
@@ -298,10 +320,14 @@ class Executor:
             for topology in topologies:
                 records: list[RunRecord] = []
                 for task in tasks:
+                    # The search seed picks *which* repeat is drawn; it is not part
+                    # of the cell's identity. So it enters _repeat_index but never the
+                    # cache key, and every seed reads the one shared tensor.
                     counter_key = (seed, topology.exec_hash, task.task_id)
                     hit = max(repeat_hint, self._hits.get(counter_key, 0))
                     repeat = self._repeat_index(*counter_key, hit)
-                    records.append(self.run(topology, task, seed, repeat))
+                    records.append(
+                        self.run(topology, task, self._sample_seed, repeat))
                     self._hits[counter_key] = hit + 1
                 evaluations.append(EvalResult(
                     topology.exec_hash, tuple(record.task_id for record in records),
