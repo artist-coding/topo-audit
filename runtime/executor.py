@@ -17,7 +17,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from string import Formatter
-from typing import Iterable, NamedTuple
+from typing import Iterable, NamedTuple, Sequence
 
 from data.loaders.math import Score, Task, score_output
 from runtime.cache import RunCache
@@ -68,6 +68,19 @@ class ExecutionError(RuntimeError):
 
 def _digest(*values: object) -> str:
     return hashlib.sha256(json.dumps(values, separators=(",", ":")).encode()).hexdigest()
+
+
+def render_inputs(received: Sequence[tuple[str, str]]) -> str:
+    """The `{inputs}` substitution: a whole section, or nothing at all.
+
+    Shared with `runtime.single_agent` so that a solver sample drawn for pi_single and
+    an input-less solver inside a topology receive byte-identical prompts. If they
+    differed, C would absorb the difference.
+    """
+    if not received:
+        return ""
+    body = "\n\n".join(f"[{role}]\n{text}\n[/{role}]" for role, text in received)
+    return f"\nReceived work:\n\n{body}\n"
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -188,10 +201,13 @@ class Executor:
             for node_index, node in enumerate(topology.execution_order()):
                 parents = topology.parents(node.id)
                 prompt_id = node.effective_prompt_id(bool(parents))
-                # Labels would make equivalent graphs issue different prompts.
-                inputs = "\n\n".join(
-                    f"[{roles[parent]}]\n{outputs[parent]['text']}\n[/{roles[parent]}]"
-                    for parent in parents)
+                # Labels carry the *effective* role, so equivalent graphs issue
+                # identical prompts. The whole block lives inside `inputs` so that a
+                # node with no parents gets no dangling "Received work:" header — the
+                # bare solvers in the vote graphs and pi_single's CoT must not be
+                # handed a degraded prompt relative to nodes that do receive work.
+                inputs = render_inputs(
+                    [(roles[parent], outputs[parent]["text"]) for parent in parents])
                 prompt = self._templates[prompt_id].format(task=task.prompt, inputs=inputs)
                 node_seed = int(_digest(seed, exec_hash, task.task_id, repeat, node_index)[:8], 16)
                 output = {

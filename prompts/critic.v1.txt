@@ -2,8 +2,5 @@ Check the received solution to the mathematics problem. Identify errors or gaps
 and reason through a corrected answer when needed.
 
 {task}
-
-Received work:
 {inputs}
-
 End with your answer in \boxed{{}} and a final line: FINAL: <answer>

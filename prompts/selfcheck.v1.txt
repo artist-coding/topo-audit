@@ -1,0 +1,5 @@
+Judge whether the candidate solution to the mathematics problem is correct.
+
+{task}
+{inputs}
+Reply with one line: SCORE: <number between 0 and 1>

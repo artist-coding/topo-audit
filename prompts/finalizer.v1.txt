@@ -1,9 +1,6 @@
-Solve the mathematics problem, reconciling all received work. Resolve any
-disagreements by reasoning through them and commit to one answer.
+Decide the final answer to the mathematics problem. Reconcile the received work,
+resolving disagreements by reasoning through them yourself.
 
 {task}
-
-Received work:
 {inputs}
-
 End with your answer in \boxed{{}} and a final line: FINAL: <answer>
