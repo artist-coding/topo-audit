@@ -11,7 +11,10 @@ becoming wrong answers. Truncation rate is an acceptance metric, not a score.
 
 from __future__ import annotations
 
+import ast
+import functools
 import hashlib
+import math
 import re
 from dataclasses import dataclass
 from typing import Iterator, Literal
@@ -114,17 +117,136 @@ def normalize_answer(ans: str | None) -> str | None:
     return s or None
 
 
-def _sympy_equal(a: str, b: str) -> bool:
+#: Why there is no symbolic fallback here any more.
+#:
+#: Measured, not hypothesised: a generation containing a LaTeX relation sent sympy's
+#: `parse_latex` into `convert_relation` -> `Relational.__new__` -> `is_eq` ->
+#: `as_real_imag` -> `evalf_integral` -> mpmath quadrature, *inside the parser*, and a
+#: probe burned 43 minutes of CPU with no progress. `score_output` runs once per tensor
+#: cell -- over 100,000 times in a sweep -- so nothing unbounded may live here.
+#:
+#: A subprocess with a timeout was the first fix, but the Executor scores inside a
+#: thread pool and forking from a multi-threaded process risks deadlocking on a lock
+#: another thread holds. So instead the grammar is restricted until the computation is
+#: bounded by construction: the three equivalences the fallback existed for --
+#: 0.5 vs \frac{1}{2}, 2/4 vs \frac{1}{2}, and \frac{\sqrt{13}+1}{2} vs
+#: \frac{1+\sqrt{13}}{2} -- are all closed-form numbers, so evaluating both sides
+#: numerically decides them without any symbolic machinery. Symbolic answers such as
+#: 8n^2+4n+1 are already handled by normalisation and never reach this point.
+_LATEX_TO_PY = (
+    (r"\cdot", "*"), (r"\times", "*"), (r"\div", "/"), (r"\pi", "pi"),
+)
+#: Characters admissible after translation. Anything else means "cannot decide".
+_NUMERIC_CHARS = set("0123456789.+-*/()^ pie")
+_NUMERIC_MAX_CHARS = 80
+_NUMERIC_TOLERANCE = 1e-9
+
+
+def _latex_to_arithmetic(text: str) -> str | None:
+    r"""Rewrite a restricted LaTeX subset as a Python arithmetic expression.
+
+    Handles \frac{a}{b} and \sqrt{a} with balanced braces, plus the few operator
+    aliases above. Returns None the moment anything outside the subset appears, which
+    is what keeps evaluation bounded.
+    """
+    if len(text) > _NUMERIC_MAX_CHARS:
+        return None
+    out, i = [], 0
+    while i < len(text):
+        if text.startswith(r"\frac", i):
+            first, rest = _take_group(text, i + len(r"\frac"))
+            if first is None:
+                return None
+            second, rest = _take_group(text, rest)
+            if second is None:
+                return None
+            inner_a, inner_b = _latex_to_arithmetic(first), _latex_to_arithmetic(second)
+            if inner_a is None or inner_b is None:
+                return None
+            out.append(f"(({inner_a})/({inner_b}))")
+            i = rest
+            continue
+        if text.startswith(r"\sqrt", i):
+            group, rest = _take_group(text, i + len(r"\sqrt"))
+            if group is None:
+                return None
+            inner = _latex_to_arithmetic(group)
+            if inner is None:
+                return None
+            out.append(f"(({inner})**0.5)")
+            i = rest
+            continue
+        for token, replacement in _LATEX_TO_PY:
+            if text.startswith(token, i):
+                out.append(replacement)
+                i += len(token)
+                break
+        else:
+            if text[i] == "\\" or text[i] in "{}":
+                return None
+            out.append(text[i])
+            i += 1
+    expression = "".join(out).replace("^", "**")
+    if set(expression) - _NUMERIC_CHARS - set("*"):
+        return None
+    return expression
+
+
+def _take_group(text: str, i: int) -> tuple[str | None, int]:
+    """Contents of the brace group starting at `i`, and the index just past it."""
+    if i >= len(text) or text[i] != "{":
+        return None, i
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1:j], j + 1
+    return None, i
+
+
+_ALLOWED_NODES = (
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Load,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub, ast.UAdd,
+)
+_ALLOWED_NAMES = {"pi": math.pi, "e": math.e}
+
+
+def _evaluate(expression: str) -> float | None:
+    """Evaluate the translated expression, or None if it is not plain arithmetic.
+
+    The AST walk is the bound: only arithmetic nodes and two constants survive, so
+    there is no call, no name lookup and nothing that can loop.
+    """
     try:
-        from sympy import simplify
-        from sympy.parsing.latex import parse_latex
-    except Exception:
-        return False
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_NODES):
+            return None
+        if isinstance(node, ast.Name) and node.id not in _ALLOWED_NAMES:
+            return None
     try:
-        diff = simplify(parse_latex(a) - parse_latex(b))
-        return bool(diff == 0)
-    except Exception:
+        value = eval(compile(tree, "<answer>", "eval"), {"__builtins__": {}},
+                     dict(_ALLOWED_NAMES))
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+@functools.lru_cache(maxsize=65536)
+def _numerically_equal(a: str, b: str) -> bool:
+    """Whether two answers denote the same number. Bounded by construction."""
+    left, right = _latex_to_arithmetic(a), _latex_to_arithmetic(b)
+    if left is None or right is None:
         return False
+    x, y = _evaluate(left), _evaluate(right)
+    if x is None or y is None:
+        return False
+    return abs(x - y) <= _NUMERIC_TOLERANCE * max(1.0, abs(x), abs(y))
 
 
 def answers_match(pred: str | None, gold: str) -> bool:
@@ -135,7 +257,7 @@ def answers_match(pred: str | None, gold: str) -> bool:
         return True
     if np_.lower() == ng.lower():
         return True
-    return _sympy_equal(np_, ng)
+    return _numerically_equal(np_, ng)
 
 
 @dataclass(frozen=True, slots=True)
