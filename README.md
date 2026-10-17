@@ -65,8 +65,9 @@ P(pi_single)─── 等 token 预算下最强的单智能体
 
 **张量一次建好，之后全是重放。** 25 行 ×（train 256×8 + audit 300×2 + val 300×2
 + test 1000）= 106,200 格 / 382,320 次节点调用。建好之后任意优化器、种子、预算、
-N 值都是离线查表，零端点调用——这也是为什么种子设到 50：重放下它们免费，
-而种子间分量正是平台期检验分辨率的瓶颈。
+N 值都是离线查表，零端点调用（`optimizers/sweep.py` 用 `ReplayOnlyEndpoint`，缺格直接报错）。
+种子设为 20：重放虽然免费，但种子共享张量格子，50 个种子会让样本被复用 3.4 次；
+而且收敛后各种子持有同一对图，种子对平台期检验的任务噪声没有帮助（见 CLAUDE.md）。
 
 ## 审阅时值得盯的几处
 
@@ -79,6 +80,9 @@ N 值都是离线查表，零端点调用——这也是为什么种子设到 50
 | `runtime/executor.py` 的 `render_inputs()` | 无入边节点不能拿到一个空的 "Received work:" 标题——否则投票图里的裸 solver 和 π_single 的 CoT 吃残缺提示，而 C 正是这两者的差 |
 | `optimizers/base.py` 的预算定义 | 缓存命中和等价掩码仍然要花掉一次候选评估及其 token，否则重放过的搜索会获得免费算力 |
 | `prompts/` | 四个角色模板 + selfcheck，E0 内不优化。改它们会触发 `bind_experiment` 报错（变了就是新的 exp） |
+| `analysis/trajectory.py` | 各优化器每轮扣的评估数不同（1 / 8 / 5–7），先对齐到同一条预算轴再比较；按 cum_evals 精确查表曾让 reinforce_edge 从平台期检验里整个消失 |
+| `runtime/single_agent.py` 的 `select_on_val_report_on_test` | π_single 在 val 上选、test 上只评估被选中的那一个，逐题分数让 C 成为配对差；截断规则与图一致 |
+| `scripts/p2_spread.py` | 建张量前的门：看最好 − 第五名、交叉拟合的 C、top-5 配对差方差，而不只是最好 − 最差 |
 
 ## 已实测的端点约束
 
@@ -86,7 +90,9 @@ N 值都是离线查表，零端点调用——这也是为什么种子设到 50
 
 - **必须绕过 clash 代理**，否则 502。而 HuggingFace 必须走代理——两边相反。
 - **`n > 1` 被拒**，所以 k 个样本 = k 次调用。
-- **思考关不掉**，`thinking.type=disabled` 与 `reasoning_effort=low` 被接受但无效。
+- **思考默认开**，`thinking.type=disabled` 无效；P1c 发现 `reasoning_effort`（none / low /
+  high / xhigh / max）能调。E0 用默认，经 `model.request_options: {}` 显式记录；改了它就进
+  `bind_experiment`，必须换 exp。
 - **`max_tokens=1024` 会把实验做废**：思考链吃光额度，`content` 返回空，记 0 分。
   而 4 节点图有 4 次机会撞上这个上限，单节点只有 1 次——会人为造出"人多更差"。
   实测 8192 下截断率 3%，真端点冒烟 0%。
@@ -101,16 +107,23 @@ python3 -m pip install -r requirements.txt
 python3 -m pytest tests/ -q     # 默认跳过 slow；全量用 -m slow
 
 python3 space/s0.py --nodes 4 --enumerate      # 应打印 34 / 25 / strict 16
-python3 data/fetch_math.py                     # 需要代理
-python3 data/make_splits.py                    # 产出并提交划分文件
+python3 data/fetch_math.py                     # 需要代理；DeepMath 用 data/fetch_deepmath.py
+python3 data/make_splits.py                    # MATH L4-5；DeepMath: --family deepmath --band 8.5
+
+# E0，按顺序，每步靠缓存可续跑
+python3 scripts/p2_spread.py --pool deepmath --band 8.5    # 门：主格、ε、val 规模
 python3 audit/run_audit.py --config configs/e0.yaml --dry-run
 python3 audit/run_audit.py --exp e0_smoke --splits val --limit-tasks 5   # 真端点冒烟
-python3 analysis/report.py --config configs/e0.yaml
+python3 audit/run_audit.py --config configs/e0.yaml        # 张量 + manifest_audit.json
+python3 runtime/single_agent.py --config configs/e0.yaml   # π_single：val 上选，test 上报
+python3 optimizers/sweep.py --config configs/e0.yaml       # 只重放
+python3 analysis/report.py --config configs/e0.yaml        # report.json + decomposition_rows.jsonl
 ```
 
 ## 现状
 
-七步全部实现，真端点冒烟通过（250 格、0 失败、0% 截断）。
+七步都有驱动和 mock 单测；真端点只跑过冒烟（250 格、0 失败、0% 截断）。模型条件已确认：
+DeepSeek-V4.1-Flash、温度 0.7、每节点 8192 token、思考用 gateway 默认。
 
 **悬着的一个决定：主格用哪个难度档。** MATH Level 4–5 对 2026 的思考模型已饱和
 （单智能体 0.91–0.93），所以换成带连续难度字段的 DeepMath-103K。实测：
@@ -122,6 +135,7 @@ python3 analysis/report.py --config configs/e0.yaml
 | **8.5** | **0.690** | **1769** | **4.8 天** |
 | 9.0 | 0.605 | 6316 | 17 天 |
 
-8.5 档比 8.0 更难且更便宜。下一步建议先跑 P2（6 张手选图 × 150 题）确认
-"最好图与最差图差 ≥5 分"，再决定要不要付全量工期——决定实验成败的不是题有多难，
-而是不同拓扑到底分不分得开。
+注意 P1b 脚本默认每档 40 题；若当时用的是默认值，95% CI 约 ±0.14，8.0 与 8.5 的差在噪声内；旧脚本的闭区间还让难度恰为
+9.0 的题同时进了两档（已改为半开区间）。下一步跑 P2（`scripts/p2_spread.py`）再决定要不要付全量
+工期——决定实验成败的不是题有多难，而是 top 端的拓扑分不分得开、最好的图能不能赢过等 token
+的 π_single，以及 val 能不能分辨 ε。
