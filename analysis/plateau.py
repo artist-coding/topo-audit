@@ -114,18 +114,27 @@ def _per_seed_differences(
     step: int,
     delta_t: int,
 ) -> tuple[np.ndarray, int]:
-    """Per-seed, per-task paired differences between the t+dt and t incumbents."""
+    """Per-seed, per-task paired differences between the t+dt and t incumbents.
+
+    Every seed must cover both budgets. Dropping the seeds that do not would compute
+    the verdict on whichever seeds happen to align with the grid -- for optimizers with
+    multi-evaluation rounds that is a biased subset, or nothing at all. Put the
+    trajectories on a common budget axis first (see :mod:`analysis.trajectory`).
+    """
+    missing = [seed for seed in sorted(incumbents)
+               if step not in incumbents[seed] or step + delta_t not in incumbents[seed]]
+    if missing:
+        raise ValueError(
+            f"seeds {missing} do not cover budgets {step} and {step + delta_t}; "
+            "align trajectories to a common budget grid before testing")
     rows, frozen = [], 0
     for seed in sorted(incumbents):
-        trajectory = incumbents[seed]
-        if step not in trajectory or step + delta_t not in trajectory:
-            continue
-        before, after = trajectory[step], trajectory[step + delta_t]
+        before, after = incumbents[seed][step], incumbents[seed][step + delta_t]
         if before == after:
             frozen += 1
         rows.append(val_rows[after] - val_rows[before])
     if not rows:
-        raise ValueError(f"no seed covers steps {step} and {step + delta_t}")
+        raise ValueError("no seeds to test")
     return np.vstack(rows), frozen
 
 
@@ -188,15 +197,20 @@ def scan_plateau(
     epsilon: float,
     **kwargs,
 ) -> list[PlateauVerdict]:
-    """Verdicts across checkpoints; the first declared step is the reported plateau."""
-    out = []
-    for step in steps:
-        try:
-            out.append(assess_plateau(optimizer, incumbents, val_rows, step=step,
-                                    delta_t=delta_t, epsilon=epsilon, **kwargs))
-        except ValueError:
-            continue
-    return out
+    """Verdicts across checkpoints; the first declared step is the reported plateau.
+
+    A step that some seed does not cover raises instead of being skipped: a silently
+    empty or partial scan reads exactly like "no plateau" in the report.
+    """
+    return [assess_plateau(optimizer, incumbents, val_rows, step=step,
+                           delta_t=delta_t, epsilon=epsilon, **kwargs)
+            for step in steps]
+
+
+def testable_steps(budgets: Sequence[int], delta_t: int) -> list[int]:
+    """Budgets t on a common grid for which t + delta_t is on the grid too."""
+    available = set(budgets)
+    return [t for t in sorted(available) if t + delta_t in available]
 
 
 def first_plateau(verdicts: Sequence[PlateauVerdict]) -> PlateauVerdict | None:
