@@ -126,15 +126,31 @@ def paired_se(left: np.ndarray, right: np.ndarray) -> float:
     """Analytic standard error of a paired mean difference.
 
     Used for the discriminability diagnostic and for power calculations, where a
-    closed form is wanted rather than a resample. For binary scores this reduces to
-    sqrt(q / n) with q the fraction of tasks on which the two graphs disagree, which
-    is why disagreement rate -- not accuracy -- sets the resolution of the study.
+    closed form is wanted rather than a resample. It is the empirical standard
+    deviation of the per-task differences over sqrt(n). For binary scores with
+    disagreement rate q and mean difference delta, Var(d) = q - delta^2, so it is
+    sqrt(q / n) when the two graphs are equally good and sqrt(q(1-q) / n) only in the
+    special case where every disagreement goes the same way.
     """
     diff = left - right
     values = diff[~np.isnan(diff)]
     if values.size < 2:
         return float("nan")
     return float(np.std(values, ddof=1) / math.sqrt(values.size))
+
+
+def paired_variance(left: np.ndarray, right: np.ndarray) -> float:
+    """Sample variance of the per-task differences between two graphs.
+
+    This is the quantity a power calculation needs, measured rather than modelled. It
+    works unchanged when the per-task scores are means over repeats (values in
+    {0, 0.5, 1} for two draws), where no disagreement-rate formula applies.
+    """
+    diff = left - right
+    values = diff[~np.isnan(diff)]
+    if values.size < 2:
+        return float("nan")
+    return float(np.var(values, ddof=1))
 
 
 def disagreement_rate(left: np.ndarray, right: np.ndarray) -> float:
@@ -144,21 +160,58 @@ def disagreement_rate(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.mean(values != 0)) if values.size else float("nan")
 
 
-def required_tasks(epsilon: float, disagreement: float, *,
-                   level: float = 0.95) -> int:
+def z_value(level: float) -> float:
+    """One-sided normal quantile for the levels the study uses."""
+    return {0.90: 1.2816, 0.95: 1.6449, 0.99: 2.3263}.get(level, 1.6449)
+
+
+def null_variance(disagreement: float) -> float:
+    """Var(d) of a paired binary difference when the true improvement is zero.
+
+    Each task contributes d in {-1, 0, +1}. With disagreement rate q and mean
+    difference delta, Var(d) = q - delta^2, which is q under the null.
+
+    An earlier version used q(1 - q): that is the variance of the disagreement
+    *indicator*, not of the difference. It understated the noise floor by a factor
+    sqrt(1 - q) -- at 300 tasks and q = 0.2 the floor is 4.25 points, not 3.80 -- and
+    the task requirement by a factor (1 - q). A 4,000-draw simulation at n = 300
+    reproduces 2.99 / 4.31 points at q = 0.1 / 0.2, against 3.00 / 4.25 from q and
+    2.85 / 3.80 from q(1 - q).
+    """
+    if not 0 < disagreement <= 1:
+        raise ValueError("disagreement must be in (0, 1]")
+    return float(disagreement)
+
+
+def resolve_variance(disagreement: float | None, variance: float | None) -> float:
+    if variance is not None:
+        if not math.isfinite(variance) or variance <= 0:
+            raise ValueError("variance must be positive and finite")
+        return float(variance)
+    if disagreement is None:
+        raise ValueError("pass a measured variance or a disagreement rate")
+    return null_variance(disagreement)
+
+
+def required_tasks(epsilon: float, disagreement: float | None = None, *,
+                   level: float = 0.95, variance: float | None = None) -> int:
     """Validation tasks needed before `epsilon` can be excluded.
 
-    Inverts the one-sided bound z * sqrt(q(1-q)/n) < epsilon at a true improvement of
-    zero. Deliberately takes no seed count: in the converged regime a plateau test
-    runs in, every seed holds the same pair of incumbents and is scored on the same
-    split, so averaging over seeds does not reduce this noise. An earlier version
-    divided by the seed count and understated the requirement by 3-7x.
+    Inverts the one-sided bound z * sqrt(Var(d) / n) < epsilon at a true improvement
+    of zero. Prefer passing the measured `variance` of paired differences (see
+    :func:`paired_variance`); a bare `disagreement` rate q is converted with
+    :func:`null_variance`, i.e. Var(d) = q.
+
+    Deliberately takes no seed count: in the converged regime a plateau test runs in,
+    every seed holds the same pair of incumbents and is scored on the same split, so
+    averaging over seeds does not reduce this noise. An earlier version divided by the
+    seed count and understated the requirement by 3-7x.
     """
-    if epsilon <= 0 or not 0 < disagreement <= 1:
-        raise ValueError("epsilon must be positive and disagreement in (0, 1]")
-    z = {0.90: 1.2816, 0.95: 1.6449, 0.99: 2.3263}.get(level, 1.6449)
-    variance = disagreement * (1.0 - disagreement)
-    return int(math.ceil((z * z * variance) / (epsilon * epsilon)))
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive")
+    z = z_value(level)
+    var = resolve_variance(disagreement, variance)
+    return int(math.ceil((z * z * var) / (epsilon * epsilon)))
 
 
 def repeat_variance(values: np.ndarray) -> float:
