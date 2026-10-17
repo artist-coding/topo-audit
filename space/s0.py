@@ -38,6 +38,11 @@ import math
 import pathlib
 from typing import Sequence
 
+if __package__ in (None, ""):  # run as a script: make the repo root importable
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
 from space.topology import (
     CRITIC,
     FINALIZER,

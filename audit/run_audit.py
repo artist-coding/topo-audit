@@ -44,7 +44,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import yaml
 
-from data.loaders.math import Task, load_pool, tasks_from_frame
+from data.loaders.math import Task
+from data.tasks import load_split_tasks
 from runtime.cache import RunCache
 from runtime.endpoints import endpoint_from_config
 from runtime.executor import ExecutionError, Executor
@@ -60,33 +61,8 @@ def distinct_rows(model: str) -> list:
 
 
 def load_tasks(config: dict, roles: list[str]) -> dict[str, list[Task]]:
-    split_file = pathlib.Path(config["task"]["splits"])
-    split = json.loads(split_file.read_text())
-    answers, levels = split["answers"], split["levels_by_task"]
-    wanted = {tid for role in roles for tid in split["splits"][role]}
-
-    frames = []
-    for source in ("train", "test"):
-        frame = load_pool("data/raw/math_hendrycks.parquet", source, (4, 5))
-        frames.append(frame[frame["task_id"].isin(wanted)])
-    import pandas as pd
-    pool = pd.concat(frames, ignore_index=True).drop_duplicates(subset="task_id")
-
-    out: dict[str, list[Task]] = {}
-    for role in roles:
-        ids = set(split["splits"][role])
-        frame = pool[pool["task_id"].isin(ids)]
-        if len(frame) != len(ids):
-            raise SystemExit(f"{role}: resolved {len(frame)} of {len(ids)} task ids; "
-                             "re-run data/fetch_math.py")
-        tasks = list(tasks_from_frame(frame, role))
-        for task in tasks:
-            if task.answer != str(answers[task.task_id]):
-                raise SystemExit(f"answer drift for {task.task_id}")
-            if task.meta["level"] != levels[task.task_id]:
-                raise SystemExit(f"level drift for {task.task_id}")
-        out[role] = tasks
-    return out
+    """Kept for callers of the old name; the implementation lives in data/tasks.py."""
+    return load_split_tasks(config, roles)
 
 
 def main() -> None:
