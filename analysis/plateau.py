@@ -54,11 +54,11 @@ import numpy as np
 from analysis.bootstrap import (
     DEFAULT_ITERATIONS,
     Interval,
-    resolve_variance,
     disagreement_rate,
     paired_se,
     paired_variance,
     required_tasks,
+    resolve_variance,
     z_value,
 )
 
