@@ -14,6 +14,8 @@ from typing import Sequence
 
 import pandas as pd
 
+from data.loaders.deepmath import DEFAULT_RAW as DEEPMATH_RAW
+from data.loaders.deepmath import load_band, tasks_from_band_frame
 from data.loaders.math import Task, load_pool, tasks_from_frame
 
 DEFAULT_RAW = "data/raw/math_hendrycks.parquet"
@@ -27,8 +29,10 @@ def load_split_tasks(config: dict, roles: Sequence[str]) -> dict[str, list[Task]
     """{role: [Task]} for the requested roles of the configured split file."""
     split = read_split(config)
     family = split.get("family", "math")
+    if family == "deepmath":
+        return _load_deepmath(config, split, roles)
     if family != "math":
-        raise NotImplementedError(f"no loader for task family {family!r} yet")
+        raise NotImplementedError(f"no loader for task family {family!r}")
     levels = tuple(split.get("levels", (4, 5)))
     raw = config["task"].get("raw", DEFAULT_RAW)
     answers, levels_by_task = split["answers"], split["levels_by_task"]
@@ -53,5 +57,24 @@ def load_split_tasks(config: dict, roles: Sequence[str]) -> dict[str, list[Task]
                 raise SystemExit(f"answer drift for {task.task_id}")
             if task.meta["level"] != levels_by_task[task.task_id]:
                 raise SystemExit(f"level drift for {task.task_id}")
+        out[role] = tasks
+    return out
+
+
+def _load_deepmath(config: dict, split: dict, roles: Sequence[str]) -> dict[str, list[Task]]:
+    low, _ = split["band"]
+    pool = load_band(config["task"].get("raw", DEEPMATH_RAW), low)
+    answers = split["answers"]
+    out: dict[str, list[Task]] = {}
+    for role in roles:
+        ids = set(split["splits"][role])
+        frame = pool[pool["task_id"].isin(ids)]
+        if len(frame) != len(ids):
+            raise SystemExit(f"{role}: resolved {len(frame)} of {len(ids)} task ids; "
+                             "re-run data/fetch_deepmath.py with the same shards")
+        tasks = list(tasks_from_band_frame(frame, role))
+        for task in tasks:
+            if task.answer != str(answers[task.task_id]):
+                raise SystemExit(f"answer drift for {task.task_id}")
         out[role] = tasks
     return out

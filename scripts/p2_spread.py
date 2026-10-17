@@ -46,13 +46,7 @@ from analysis.bootstrap import (  # noqa: E402
     required_tasks,
     z_value,
 )
-from data.loaders.math import (  # noqa: E402
-    PROMPT_TEMPLATE,
-    Task,
-    load_pool,
-    task_id_for,
-    tasks_from_frame,
-)
+from data.loaders.math import Task, load_pool, tasks_from_frame  # noqa: E402
 from runtime.single_agent import SingleAgentRunner, StrategyRun, _accumulate  # noqa: E402
 from space.s0 import S0_ROLES, declared_nodes  # noqa: E402
 from space.topology import Topology  # noqa: E402
@@ -83,22 +77,13 @@ def probe_tasks(config: dict, pool: str, n: int, seed: int,
         picked = held_out.iloc[rng.permutation(len(held_out))[:n]]
         return list(tasks_from_frame(picked, "audit"))
     if pool == "deepmath":
-        import pandas as pd
+        from data.loaders.deepmath import DEFAULT_RAW, load_band, tasks_from_band_frame
 
         if band is None:
             raise SystemExit("--band is required for the deepmath pool")
-        frame = pd.read_parquet("data/raw/deepmath.parquet")
-        top = band + 0.5 >= frame["difficulty"].max()
-        upper = (frame["difficulty"] <= band + 0.5) if top else (frame["difficulty"] < band + 0.5)
-        frame = frame[(frame["difficulty"] >= band) & upper].copy()
-        frame["task_id"] = frame["question"].map(task_id_for)
-        frame = frame.drop_duplicates(subset="task_id").reset_index(drop=True)
+        frame = load_band(config["task"].get("deepmath_raw", DEFAULT_RAW), band)
         picked = frame.iloc[rng.permutation(len(frame))[:n]]
-        return [Task(task_id=row.task_id, family="deepmath", split_role="audit",
-                     prompt=PROMPT_TEMPLATE.format(problem=row.question.strip()),
-                     answer=str(row.final_answer),
-                     meta={"difficulty": float(row.difficulty), "topic": row.topic})
-                for row in picked.itertuples()]
+        return list(tasks_from_band_frame(picked, "audit"))
     raise SystemExit(f"unknown pool {pool!r}")
 
 
@@ -195,6 +180,8 @@ def summarize_probe(records, single_runs: Sequence[StrategyRun],
     second_or_fifth = spread["fifth"] or spread["second"]
     return {
         "tasks": len(task_ids),
+        # make_splits.py --exclude-p2 keeps these out of every role of the real split.
+        "task_ids": task_ids,
         "graphs": stats,
         "ranking": ranked,
         "spread": spread,
