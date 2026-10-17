@@ -93,4 +93,8 @@ reinforce_edge:                  # GPTSwarm 式边级策略梯度 + 组内相对
 acceptance:
   identity_tolerance: 1.0e-9
   max_truncation_rate: 0.15      # 超过就说明 max_tokens_per_node 还不够
+  # 任一节点截断整次运行记 0，所以图越深越吃亏：单节点 3% 时 4 节点链约 11.5%。
+  # 影响图间比较的是各行截断率的差：两行差 s 时，它们的分差被压掉约 p·s（p≈0.7 时
+  # 3 个百分点的差就是约 2 分，和 ε 同量级）。超过这个门槛先加 token 上限再建张量。
+  max_row_truncation_spread: 0.03
   token_reconciliation_error: 0.01

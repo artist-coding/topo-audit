@@ -142,6 +142,14 @@ class RunCache:
         with self._stats_lock:
             return dict(self._stats)
 
+    def keys(self, exp: str) -> set[CacheKey]:
+        """Every cached key of an experiment, without decoding the records."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT model, exec_hash, task_id, seed, repeat FROM records WHERE exp = ?",
+                (exp,)).fetchall()
+        return {tuple(row) for row in rows}
+
     def export(self, exp: str) -> Iterator[RunRecord]:
         with self._connect() as connection:
             rows = connection.execute(

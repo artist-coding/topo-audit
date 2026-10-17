@@ -82,3 +82,39 @@ def coverage(matrix: ScoreMatrix) -> dict:
                        if not present[i].any()],
         "min_row_coverage": float(present.mean(axis=1).min()) if present.size else 0.0,
     }
+
+
+def truncation_summary(records: Iterable[RunRecord], rows_order: Sequence[str] | None,
+                       max_spread: float | None) -> dict:
+    """Per-row truncation rate on every split.
+
+    A truncated node zeroes its whole run, so a deep graph has more chances to be
+    zeroed than a single node: with a 3% per-node rate a four-node chain loses about
+    11.5% of its runs to truncation alone. The *spread* across rows, not the overall
+    rate, is what leaks into the comparison between graphs.
+    """
+    counts: dict[tuple[str, str], list[int]] = {}
+    for record in records:
+        cell = counts.setdefault((record.split_role, record.exec_hash), [0, 0])
+        cell[0] += bool(record.truncated_nodes)
+        cell[1] += 1
+    out: dict = {}
+    for split in sorted({split for split, _ in counts}):
+        rows = rows_order if rows_order is not None else sorted(
+            {h for s, h in counts if s == split})
+        rates = {h: counts[(split, h)][0] / counts[(split, h)][1]
+                 for h in rows if (split, h) in counts}
+        if not rates:
+            continue
+        values = np.array(list(rates.values()))
+        spread = float(values.max() - values.min())
+        worst = sorted(rates, key=lambda h: -rates[h])[:3]
+        out[split] = {
+            "overall": float(sum(counts[(split, h)][0] for h in rates)
+                             / sum(counts[(split, h)][1] for h in rates)),
+            "max_row": float(values.max()), "min_row": float(values.min()),
+            "spread": spread,
+            "worst_rows": {h[:12]: rates[h] for h in worst},
+            "spread_ok": None if max_spread is None else spread <= max_spread,
+        }
+    return out

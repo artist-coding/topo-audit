@@ -45,7 +45,7 @@ def main() -> None:
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--models", nargs="*", default=["DeepSeek"])
     ap.add_argument("--bands", type=float, nargs="*", default=None,
-                    help="band lower bounds; each spans +0.5 (e.g. 8.5 -> [8.5, 9.0])")
+                    help="band lower bounds; each spans +0.5 (e.g. 8.5 -> [8.5, 9.0))")
     args = ap.parse_args()
 
     pool = pd.read_parquet(RAW)
@@ -56,7 +56,12 @@ def main() -> None:
     bands = ([(low, low + 0.5) for low in args.bands] if args.bands else BANDS)
     jobs = []
     for low, high in bands:
-        band = pool[(pool["difficulty"] >= low) & (pool["difficulty"] <= high)]
+        # Half-open [low, high): with closed intervals every problem rated exactly 9.0
+        # sat in both the "8.5" and the "9.0" band (and 8.5 in both "8.0" and "8.5").
+        # The top band keeps its upper edge.
+        top = high >= pool["difficulty"].max()
+        upper = (pool["difficulty"] <= high) if top else (pool["difficulty"] < high)
+        band = pool[(pool["difficulty"] >= low) & upper]
         if len(band) < args.per_band:
             print(f"  band [{low}, {high}] has only {len(band)} problems, skipping")
             continue

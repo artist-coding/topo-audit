@@ -56,7 +56,12 @@ from analysis.decompose import (  # noqa: E402
     select_g_hat_n,
     select_g_star_plugin,
 )
-from analysis.matrices import build_matrix, coverage, repeat_cube  # noqa: E402
+from analysis.matrices import (  # noqa: E402
+    build_matrix,
+    coverage,
+    repeat_cube,
+    truncation_summary,
+)
 from analysis.plateau import (  # noqa: E402
     first_plateau,
     observed_disagreement,
@@ -139,42 +144,6 @@ def load_pi_single(frontier: dict | None, test_task_ids: Sequence[str],
 
 
 # ---------------------------------------------------------------- diagnostics
-
-def truncation_summary(records: Iterable[RunRecord], rows_order: Sequence[str],
-                       max_spread: float | None) -> dict:
-    """Per-row truncation rate on every split.
-
-    A truncated node zeroes its whole run, so a deep graph has more chances to be
-    zeroed than a single node: with a 3% per-node rate a four-node chain loses about
-    11.5% of its runs to truncation alone. The *spread* across rows, not the overall
-    rate, is what leaks into the comparison between graphs.
-    """
-    counts: dict[tuple[str, str], list[int]] = {}
-    for record in records:
-        if record.split_role not in SPLITS:
-            continue
-        cell = counts.setdefault((record.split_role, record.exec_hash), [0, 0])
-        cell[0] += bool(record.truncated_nodes)
-        cell[1] += 1
-    out: dict = {}
-    for split in SPLITS:
-        rates = {h: counts[(split, h)][0] / counts[(split, h)][1]
-                 for h in rows_order if (split, h) in counts}
-        if not rates:
-            continue
-        values = np.array(list(rates.values()))
-        spread = float(values.max() - values.min())
-        worst = sorted(rates, key=lambda h: -rates[h])[:3]
-        out[split] = {
-            "overall": float(sum(counts[(split, h)][0] for h in rates)
-                             / sum(counts[(split, h)][1] for h in rates)),
-            "max_row": float(values.max()), "min_row": float(values.min()),
-            "spread": spread,
-            "worst_rows": {h[:12]: rates[h] for h in worst},
-            "spread_ok": None if max_spread is None else spread <= max_spread,
-        }
-    return out
-
 
 def power_section(matrices: dict[str, ScoreMatrix], rows_order: Sequence[str],
                   epsilon: float, n_seeds: int, top_k: int = POWER_TOP_K) -> dict:
