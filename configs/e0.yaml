@@ -12,7 +12,11 @@ model:
   # 1024 会让 L5 难题的思考链吃光预算、content 返回空：实测 DeepSeek 1/3、
   # gpt-oss 3/3、Laguna 3/3 在 1024 下截断且无答案。8192 下仍有约 1/3 的最难题截断。
   max_tokens_per_node: 8192
-  thinking: unavailable_to_disable   # thinking.type=disabled 被接受但无效，仍有 reasoning_tokens
+  # 思考模式：gateway 默认开，E0 主条件就用默认（P1 与真端点冒烟都是这个条件）。
+  # thinking.type=disabled 无效，但 P1c 实测 reasoning_effort 可调（none / low / high /
+  # xhigh / max）。要做思考轴就在这里填 {reasoning_effort: none} 之类并换一个 exp：
+  # 它会进 bind_experiment，和默认条件的缓存混不到一起。
+  request_options: {}
   timeout_s: 900                 # band-9 generations ran to 120s; leave real headroom
   retry:
     max_attempts: 3              # gateway 偶发 502

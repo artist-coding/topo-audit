@@ -70,16 +70,22 @@ class RunCache:
         finally:
             connection.close()
 
-    def bind_experiment(self, settings: dict) -> None:
-        """Reject silent reuse when settings change; choose a new exp instead."""
+    def bind_experiment(self, settings: dict, *, scope: str = "") -> None:
+        """Reject silent reuse when settings change; choose a new exp instead.
+
+        `scope` binds an additional settings group under the same experiment (e.g. the
+        pi_single self-check template and sample count) without altering the main
+        blob, so existing caches stay valid.
+        """
+        key = f"{self.exp}::{scope}" if scope else self.exp
         blob = json.dumps(settings, sort_keys=True, separators=(",", ":"), allow_nan=False)
         with self._connect() as connection:
             connection.execute(
-                "INSERT OR IGNORE INTO experiments VALUES (?, ?)", (self.exp, blob))
+                "INSERT OR IGNORE INTO experiments VALUES (?, ?)", (key, blob))
             saved, = connection.execute(
-                "SELECT settings FROM experiments WHERE exp = ?", (self.exp,)).fetchone()
+                "SELECT settings FROM experiments WHERE exp = ?", (key,)).fetchone()
             if saved != blob:
-                raise ValueError("experiment settings changed; use a new exp")
+                raise ValueError(f"experiment settings changed ({key}); use a new exp")
 
     @contextmanager
     def claim(self, key: CacheKey) -> Iterator[None]:

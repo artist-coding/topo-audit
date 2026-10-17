@@ -46,7 +46,7 @@ import yaml
 
 from data.loaders.math import Task, load_pool, tasks_from_frame
 from runtime.cache import RunCache
-from runtime.endpoints import OpenAICompatEndpoint
+from runtime.endpoints import endpoint_from_config
 from runtime.executor import ExecutionError, Executor
 from space.s0 import S0_ROLES, enumerate_space
 
@@ -126,13 +126,7 @@ def main() -> None:
     if args.dry_run:
         return
 
-    endpoint = OpenAICompatEndpoint(
-        name=config["model"]["name"], base_url=config["model"]["endpoint"],
-        api_key_env=config["model"]["api_key_env"],
-        max_concurrency=args.concurrency or config["model"]["max_concurrency"],
-        max_attempts=config["model"]["retry"]["max_attempts"],
-        backoff_s=config["model"]["retry"]["backoff_s"],
-        timeout_s=config["model"].get("timeout_s", 900))
+    endpoint = endpoint_from_config(config["model"], concurrency=args.concurrency)
     cache = RunCache(f"runs/{exp}/cache.sqlite", exp=exp)
     executor = Executor(
         endpoint, cache, max_tokens_per_node=config["model"]["max_tokens_per_node"],
