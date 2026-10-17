@@ -8,7 +8,9 @@ edge subsets collapse to **34** distinct executable DAGs under the pruning rule 
 Two nested spaces are enumerated and both are reported:
 
 - ``S0`` (34 graphs) allows input-less Critic/Reviser nodes, which degrade to Solver.
-  These are exactly the parallel-vote topologies — the three-way vote graph is
+  (The lone Finalizer of the zero-edge graph G_empty plays Solver as well, so G_empty
+  is the in-space single agent and matches pi_single's CoT prompt exactly.)
+  The graphs with input-less nodes are exactly the parallel-vote topologies — the three-way vote graph is
   ``n1->n4 n2->n4 n3->n4`` — and they are the most likely members to be optimal on
   math, so excluding them would purge the space of its best candidates.
 - ``S0_strict`` (16 graphs) requires every executing Critic/Reviser to have an

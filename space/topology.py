@@ -37,8 +37,17 @@ FINALIZER = "finalizer"
 
 #: Roles that read peer output to do their job. With no in-edges they have nothing to
 #: work on, so they degrade to SOLVER (decision 2026-10-13: allow input-less nodes and
-#: record the degradation, rather than forbidding the graph).
+#: record the degradation, rather than forbidding the graph). This set also defines
+#: S0_strict, which requires these roles to have inputs.
 INPUT_DEPENDENT_ROLES = frozenset({CRITIC, REVISER})
+
+#: Roles whose template refers to received work. The terminal Finalizer is always run,
+#: so it is not part of the strict-space rule, but alone it would be told to
+#: "reconcile the received work" when it has received none. The zero-edge graph
+#: G_empty is the in-space single agent, so an input-less Finalizer plays Solver too:
+#: G_empty then issues byte-for-byte the prompt of pi_single's CoT, and
+#: P(G_empty) vs P(CoT) becomes a consistency check between the two code paths.
+PLAYS_SOLVER_WITHOUT_INPUTS = INPUT_DEPENDENT_ROLES | {FINALIZER}
 
 #: How a node combines multiple in-edges. Frozen for E0; part of the hash because it
 #: changes the score of every multi-in-edge graph (notably the parallel-vote graphs).
@@ -59,12 +68,13 @@ class Node:
     def effective_role(self, has_inputs: bool) -> str:
         """Role actually played once the graph is known.
 
-        A Critic or Reviser with no in-edges receives nothing, so it independently
-        solves the task. The distinction is logged and hashed: a 'Critic' that never
-        read a solution is a second Solver, and the parallel-vote graphs in S0 are
-        built entirely out of such nodes.
+        A Critic, Reviser or Finalizer with no in-edges receives nothing, so it
+        independently solves the task. The distinction is logged and hashed: a 'Critic'
+        that never read a solution is a second Solver, the parallel-vote graphs in S0
+        are built out of such nodes, and the lone Finalizer of G_empty is the in-space
+        single agent.
         """
-        if not has_inputs and self.role in INPUT_DEPENDENT_ROLES:
+        if not has_inputs and self.role in PLAYS_SOLVER_WITHOUT_INPUTS:
             return SOLVER
         return self.role
 

@@ -188,3 +188,25 @@ def test_node_with_parents_gets_the_received_work_section():
     assert chain.parents("n4") == ("n1",)
     rendered = render_inputs([("solver", "partial answer")])
     assert "Received work" in rendered and "[solver]" in rendered
+
+
+def test_zero_edge_graph_issues_the_cot_prompt_byte_for_byte(tmp_path):
+    """G_empty is the in-space single agent: its lone Finalizer must play Solver.
+
+    Before, it received the Finalizer template ("reconcile the received work") with
+    nothing received, so P(G_empty) and P(CoT) compared two different prompts.
+    """
+    tasks = _tasks(1)
+    endpoint = MockEndpoint(tasks, success_rate=1.0, max_concurrency=1)
+    executor = Executor(endpoint, RunCache(tmp_path / "c.sqlite", exp="t_empty"),
+                        max_tokens_per_node=256, temperature=0.7, train_repeats=1,
+                        runs_dir=tmp_path / "runs")
+    g_empty = Topology.canonical(declared_nodes(S0_ROLES, endpoint.name), [],
+                                 space_id="s4")
+    assert g_empty.node_ids == ("n4",)
+    record = executor.run(g_empty, tasks[0], seed=0, repeat=0)
+    assert record.effective_roles == {"n4": "solver"}
+    node_prompt = endpoint.calls[-1]["payload"]["messages"][0]["content"]
+    cot_prompt = _templates()["solver.v1"].format(task=tasks[0].prompt,
+                                                  inputs=render_inputs([]))
+    assert node_prompt == cot_prompt

@@ -195,7 +195,18 @@ def test_repeat_hint_and_counts_are_scoped_by_seed_computation_and_task(tmp_path
     assert evaluation.gen_tokens == sum(record.gen_tokens for record in records)
     executor.evaluate_batch([graph], tasks[:1], seed=6, repeat_hint=0)
     other.evaluate_batch([graph], tasks[:1], seed=6, repeat_hint=0)
-    assert endpoint.calls[-1]["payload"] == other_endpoint.calls[-1]["payload"]
+    # A new search seed starts its own counter at hit 0 in both executors, whatever
+    # seed 5 consumed, so both request the same tensor cell. (Comparing "the last
+    # endpoint call" instead depended on whether that cell happened to be cached
+    # already, i.e. on the exec_hash.)
+    h, t0 = graph.exec_hash, tasks[0].task_id
+    assert executor._hits[(5, h, t0)] == 4 and other._hits[(5, h, t0)] == 4
+    assert executor._hits[(6, h, t0)] == 1 and other._hits[(6, h, t0)] == 1
+    cell = executor._repeat_index(6, h, t0, 0)
+    assert cell == other._repeat_index(6, h, t0, 0)
+    for ex in (executor, other):
+        assert (h, t0, cell) in {(r.exec_hash, r.task_id, r.repeat)
+                                 for r in ex.cache.export(ex.exp)}
 
 
 @pytest.mark.parametrize("node_index", (0, 1))
@@ -405,8 +416,11 @@ def test_unknown_template_or_mismatched_model_is_rejected_before_calling(tmp_pat
     executor = executor_at(tmp_path, endpoint)
     with pytest.raises(ValueError, match="model"):
         executor.run(topology(model="other"), tasks[0], 0, 0)
-    graph = topology()
-    graph = replace(graph, nodes=(replace(graph.nodes[0], prompt_id="missing.v1"),))
+    # The terminal keeps its declared template only when it has inputs (a lone
+    # Finalizer plays Solver), so plant the unknown template on a fed terminal.
+    graph = topology((("n1", "n4"),))
+    graph = replace(graph, nodes=(graph.nodes[0],
+                                  replace(graph.nodes[1], prompt_id="missing.v1")))
     with pytest.raises(ValueError, match="template"):
         executor.run(graph, tasks[0], 0, 0)
     assert endpoint.call_count == 0
