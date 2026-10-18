@@ -69,7 +69,7 @@
 七步都已实现并有 mock 单测（`python3 -m pytest tests/ -q`，默认跳过 slow）；真端点只跑过冒烟（250 格）。
 
 1. ✅ `space/` — Topology、剪枝、规范化、双 hash、S₀/S₁ 枚举。34 / 16 / 422 对上闭式；计算数 25 / 298。
-2. ✅ `data/` — MATH L4–5 加载与打分、固定种子四角色划分；`data/tasks.py` 供所有驱动共用。DeepMath 只有下载与 P1b 探针，主格定下来后再补加载器与划分。
+2. ✅ `data/` — MATH L4–5 与 DeepMath（单个难度档）的加载与打分、固定种子四角色划分（`make_splits.py --family deepmath --band B --exclude-p2 …`）；`data/tasks.py` 供所有驱动共用。
 3. ✅ `runtime/` — 端点客户端（重试、`request_options`、`ReplayOnlyEndpoint`）、执行器、缓存、token 记账。
 4. ✅ `runtime/single_agent.py` — π_single 四种策略 × 预算曲线；`main()` 在 val 上选、test 上报。
 5. ✅ `optimizers/` — 随机搜索、边级 REINFORCE/GRPO、prune_from_dense、贪心局部搜索；`optimizers/sweep.py` 只重放。
