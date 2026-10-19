@@ -40,7 +40,8 @@ def cost_summary(records, config, *, fresh_run_ids, wall_s, concurrency):
             nodes.append({'role': role, 'truncated': bool(node.get('truncated')),
                           'retries': max(0, len(node_attempts) - 1)})
             for a in node_attempts:
-                attempts.append({**a, 'role': role, 'fresh': r.run_id in fresh_run_ids})
+                attempts.append({**a, 'role': role, 'fresh': r.run_id in fresh_run_ids,
+                                 'task_id': r.task_id, 'kind': 'pi_single' if r.split_role == 'pi_single' else 'graph'})
     success = [a for a in attempts if a.get('error') is None]
     def token(a): return (a.get('raw_usage') or {}).get('completion_tokens')
     fresh = [a for a in attempts if a['fresh']]
@@ -55,6 +56,23 @@ def cost_summary(records, config, *, fresh_run_ids, wall_s, concurrency):
                           'node_calls': len(ns), 'truncated_calls': sum(n['truncated'] for n in ns),
                           'truncation_rate': sum(n['truncated'] for n in ns) / len(ns)}
     lengths = distribution(token(a) for a in success if token(a) is not None)
+    lengths_by_kind = {kind: distribution(token(a) for a in success
+                       if a['kind'] == kind and token(a) is not None)
+                       for kind in ('graph', 'pi_single')}
+    by_task = {}
+    for tid in sorted({a['task_id'] for a in attempts}):
+        mine = [a for a in attempts if a['task_id'] == tid]
+        by_task[tid] = {
+            'attempts': len(mine),
+            'completion_tokens_known': sum(token(a) or 0 for a in mine),
+            'attempts_missing_usage': sum(token(a) is None for a in mine),
+            'fresh_completion_tokens_known': sum(token(a) or 0 for a in mine if a['fresh']),
+            'by_kind': {kind: sum(token(a) or 0 for a in mine if a['kind'] == kind)
+                        for kind in ('graph', 'pi_single')}}
+    total_known = sum(t['completion_tokens_known'] for t in by_task.values())
+    for t in by_task.values():
+        t['share_of_known_completion_tokens'] = t['completion_tokens_known'] / total_known if total_known else None
+
     # Derive graph calls from the actual space, rather than embedding 90 in estimates.
     from space.s0 import enumerate_space
     rows = {g.exec_hash: g for g in enumerate_space(model=config.get('model', {}).get('name', 'unspecified'))}
@@ -67,10 +85,23 @@ def cost_summary(records, config, *, fresh_run_ids, wall_s, concurrency):
               'tensor': node_sum * tensor_cells, 'val_single': sizes.get('val', 0) * single_calls}
     counts['p2_total'] = counts['p2_graph'] + counts['p2_single']
     counts['tensor_plus_val_single'] = counts['tensor'] + counts['val_single']
-    estimates = {k: (v * lengths['mean'] / throughput / 86400
-                     if throughput and lengths['mean'] is not None else None) for k, v in counts.items()}
+    for val_repeats in (1, 2):
+        counts[f'tensor_val_r{val_repeats}'] = node_sum * (
+            tensor_cells + sizes.get('val', 0) * (val_repeats - reps.get('val', 1)))
+    def days(calls, kind):
+        mean = lengths_by_kind[kind]['mean']
+        return calls * mean / throughput / 86400 if throughput and mean is not None else None
+    estimates = {k: days(v, 'pi_single' if k in ('p2_single', 'val_single') else 'graph')
+                 for k, v in counts.items() if k not in ('p2_total', 'tensor_plus_val_single')}
+    for total, a, b in [('p2_total', 'p2_graph', 'p2_single'),
+                         ('tensor_plus_val_single', 'tensor', 'val_single')]:
+        estimates[total] = (estimates[a] + estimates[b]
+                           if estimates[a] is not None and estimates[b] is not None else None)
     return {'wall_s': wall_s, 'concurrency': concurrency, 'completion_tokens': lengths,
             'by_effective_role': per_role,
+            'completion_tokens_by_kind': lengths_by_kind,
+            'by_task': by_task,
+            'per_task_completion_tokens_known': distribution(t['completion_tokens_known'] for t in by_task.values()),
             'successful_attempt_tokens_per_second': distribution(
                 token(a) / a['latency_s'] for a in success
                 if token(a) is not None and a.get('latency_s', 0) > 0),
@@ -86,7 +117,7 @@ def cost_summary(records, config, *, fresh_run_ids, wall_s, concurrency):
             'missing_artifacts': missing_artifacts,
             'projection': {'calls': counts, 'days_at_measured_concurrency': estimates,
                            'assumptions': '150 P2 tasks x 2 repeats; configured tensor splits/repeats; '
-                           'single-agent calls use graph mean length as a proxy. No extrapolation to '
+                           'Graph and single-agent projections use their own observed means; unmeasured groups are null. No extrapolation to '
                            'unmeasured concurrency. Small, role-mixed smoke sample; not a runtime guarantee.'}}
 
 

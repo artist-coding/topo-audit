@@ -64,3 +64,27 @@ def test_zero_observed_variance_does_not_claim_zero_required_tasks():
              for g in graphs.values() for t in range(10) for rep in range(2)]
     s=summarize_probe(records,[],graphs,list(map(str,range(10))),repeats=2)
     assert s['power']['repeat_projection']['by_repeats']['1']['val_tasks_needed']=={}
+
+
+def test_graph_and_single_lengths_are_not_mixed_in_projections(tmp_path):
+    usage=lambda n: {'error':None,'status_code':200,'latency_s':1,'raw_usage':{'completion_tokens':n}}
+    gp=tmp_path/'graph.json';gp.write_text(json.dumps({'nodes':{'n4':{
+        'effective_role':'solver','attempts':[usage(100)]}}}))
+    sp=tmp_path/'single.json';sp.write_text(json.dumps({'attempts':[usage(10)]}))
+    graph=replace(_record('g','t1',1),node_outputs_path=str(gp))
+    single=replace(_record('s','t2',1),split_role='pi_single',node_outputs_path=str(sp))
+    cfg={'splits':{'train':256,'audit':300,'val':1350,'test':1000},
+         'tensor':{'repeats':{'train':8,'audit':2,'val':2,'test':1}}}
+    cost=cost_summary([graph,single],cfg,fresh_run_ids={graph.run_id,single.run_id},wall_s=10,concurrency=2)
+    assert cost['completion_tokens_by_kind']['graph']['mean']==100
+    assert cost['completion_tokens_by_kind']['pi_single']['mean']==10
+    days=cost['projection']['days_at_measured_concurrency'];calls=cost['projection']['calls']
+    assert days['tensor']==pytest.approx(571320*100/11/86400)
+    assert days['p2_single']==pytest.approx(3300*10/11/86400)
+    assert days['p2_total']==pytest.approx(days['p2_graph']+days['p2_single'])
+    assert calls['tensor_val_r1']==449820 and calls['tensor_val_r2']==571320
+    assert cost['by_task']['t1']['share_of_known_completion_tokens']==pytest.approx(100/110)
+    assert cost['per_task_completion_tokens_known']['mean']==55
+    graph_only=cost_summary([graph],cfg,fresh_run_ids={graph.run_id},wall_s=10,concurrency=2)
+    assert graph_only['projection']['days_at_measured_concurrency']['p2_total'] is None
+    assert graph_only['projection']['days_at_measured_concurrency']['val_single'] is None
