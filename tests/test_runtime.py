@@ -660,3 +660,23 @@ def test_stream_setting_is_bound_to_cache(tmp_path):
     executor_at(tmp_path, http_endpoint(tmp_path, stream=True))
     with pytest.raises(ValueError):
         executor_at(tmp_path, http_endpoint(tmp_path, stream=False))
+
+
+@pytest.mark.parametrize('variant', ['empty_after_finish', 'missing_index', 'null_delta', 'null_choices', 'done_at_eof'])
+def test_harmless_stream_variants(variant):
+    choice = {'index': 0, 'delta': {'content': 'answer'}, 'finish_reason': 'stop'}
+    if variant == 'missing_index':
+        choice.pop('index')
+    chunks = [{'choices': [choice]}]
+    if variant == 'empty_after_finish':
+        chunks.append({'choices': [{'index': 0, 'delta': {'content': ''}}]})
+    if variant == 'null_delta':
+        chunks.append({'choices': [{'index': 0, 'delta': None}]})
+    chunks.append({'choices': None if variant == 'null_choices' else [],
+                   'usage': {'prompt_tokens': 2, 'completion_tokens': 3}})
+    data = stream_bytes(*chunks).getvalue()
+    if variant == 'done_at_eof':
+        data = data.rstrip(b'\n')
+    result = OpenAICompatEndpoint._read_stream(io.BytesIO(data))
+    assert result['choices'][0]['message']['content'] == 'answer'
+    assert result['usage']['completion_tokens'] == 3

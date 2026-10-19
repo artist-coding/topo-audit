@@ -153,8 +153,7 @@ def build_tensor(config: dict, executor: Executor, cells: list, *, concurrency: 
             "truncation_ok": (done["truncated"] / max(done["n"], 1)
                               <= acceptance["max_truncation_rate"]),
             "max_row_truncation_spread": acceptance.get("max_row_truncation_spread"),
-            "row_truncation_spread_ok": all(
-                block["spread_ok"] is not False for block in per_row.values()),
+            "row_truncation_spread_ok": per_row.get("pooled", {}).get("spread_ok"),
             "token_reconciliation_error": reconciliation_error,
             "token_reconciliation_ok": (reconciliation_error
                                         <= acceptance["token_reconciliation_error"]),

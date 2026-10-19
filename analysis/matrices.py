@@ -93,6 +93,7 @@ def truncation_summary(records: Iterable[RunRecord], rows_order: Sequence[str] |
     11.5% of its runs to truncation alone. The *spread* across rows, not the overall
     rate, is what leaks into the comparison between graphs.
     """
+    records = list(records)
     counts: dict[tuple[str, str], list[int]] = {}
     for record in records:
         cell = counts.setdefault((record.split_role, record.exec_hash), [0, 0])
@@ -117,4 +118,18 @@ def truncation_summary(records: Iterable[RunRecord], rows_order: Sequence[str] |
             "worst_rows": {h[:12]: rates[h] for h in worst},
             "spread_ok": None if max_spread is None else spread <= max_spread,
         }
+    from analysis.probe_diagnostics import truncation_noise
+    pooled_counts = {}
+    for (_, row), (truncated, total) in counts.items():
+        c = pooled_counts.setdefault(row, [0, 0])
+        c[0] += truncated
+        c[1] += total
+    if pooled_counts:
+        rates = [a / b for a, b in pooled_counts.values()]
+        noise = truncation_noise(records, max_spread)
+        out["pooled"] = {"overall": sum(a for a, b in pooled_counts.values()) /
+                                    sum(b for a, b in pooled_counts.values()),
+                         "min_row": min(rates), "max_row": max(rates),
+                         "spread": max(rates) - min(rates),
+                         "spread_ok": noise["spread_ok"], "noise_reference": noise}
     return out

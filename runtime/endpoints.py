@@ -342,7 +342,8 @@ class OpenAICompatEndpoint(_RetryingEndpoint):
         content, data = [], []
         usage, finish = {}, None
         try:
-            for raw_line in response:
+            from itertools import chain
+            for raw_line in chain(response, (b"\n",)):
                 line = raw_line.decode("utf-8").rstrip("\r\n")
                 if line.startswith("data:"):
                     data.append(line[5:].lstrip(" "))
@@ -359,12 +360,12 @@ class OpenAICompatEndpoint(_RetryingEndpoint):
                         usage = chunk["usage"]
                     if "error" in chunk:
                         raise EndpointStreamError(usage)
-                    for choice in chunk.get("choices", []):
-                        if choice.get("index") != 0:
+                    for choice in chunk.get("choices") or []:
+                        if choice.get("index", 0) != 0:
                             raise EndpointStreamError(usage)
-                        text = choice.get("delta", {}).get("content")
+                        text = (choice.get("delta") or {}).get("content")
                         if text is not None:
-                            if not isinstance(text, str) or finish is not None:
+                            if not isinstance(text, str) or (finish is not None and text):
                                 raise EndpointStreamError(usage)
                             content.append(text)
                         if choice.get("finish_reason") is not None:

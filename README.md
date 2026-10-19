@@ -99,13 +99,13 @@ N 值都是离线查表，零端点调用（`optimizers/sweep.py` 用 `ReplayOnl
 - **必须绕过 clash 代理**，否则 502。而 HuggingFace 必须走代理——两边相反。
 - **`n > 1` 被拒**，所以 k 个样本 = k 次调用。
 - **思考默认开**，`thinking.type=disabled` 无效；P1c 发现 `reasoning_effort`（none / low /
-  high / xhigh / max）能调。E0 用默认，经 `model.request_options: {}` 显式记录；改了它就进
+  high / xhigh / max）能调。历史 E0 模板用默认，经 `model.request_options: {}` 显式记录；改了它就进
   `bind_experiment`，必须换 exp。
 - **`max_tokens=1024` 会把实验做废**：思考链吃光额度，`content` 返回空，记 0 分。
   而 4 节点图有 4 次机会撞上这个上限，单节点只有 1 次——会人为造出"人多更差"。
   实测 8192 下截断率 3%，真端点冒烟 0%。
-- **聚合吞吐在 ~1000–1200 生成 token/s 饱和，与并发数无关。** 并发 8 和 32 总量相同，
-  64 开始排队，128 触发 429。所以工期由"要生成多少 token"唯一决定。
+- **历史短提示吞吐约 1000–1200 生成 token/s。** 该次探测中并发 8 和 32 总量相同，
+  64 开始排队，128 触发 429。这是短提示探测；长生成必须另测各并发的实际吞吐与失败耗时。
 
 ## 怎么跑
 
@@ -118,8 +118,8 @@ python3 space/s0.py --nodes 4 --enumerate      # 应打印 34 / 25 / strict 16
 python3 data/fetch_math.py                     # 需要代理；DeepMath 用 data/fetch_deepmath.py
 python3 data/make_splits.py                    # MATH L4-5；DeepMath: --family deepmath --band 8.5
 
-# E0，按顺序，每步靠缓存可续跑
-python3 scripts/p2_spread.py --pool deepmath --band 8.5    # 门：主格、ε、val 规模
+# 历史 E0 驱动顺序；先完成下文成本诊断/P2，并另建正式 DeepMath 配置，勿直接运行旧模板
+# 当前 P2 冒烟命令见“现状”，运行条件尚未冻结
 python3 audit/run_audit.py --config configs/e0.yaml --dry-run
 python3 audit/run_audit.py --exp e0_smoke --splits val --limit-tasks 5   # 真端点冒烟
 python3 audit/run_audit.py --config configs/e0.yaml        # 张量 + manifest_audit.json
@@ -129,6 +129,28 @@ python3 analysis/report.py --config configs/e0.yaml        # report.json + decom
 ```
 
 ## 现状
+
+issue #3 的长生成成本复核（2026-10-19，默认思考/stream/32k，并发 4）：
+90 次节点调用，均值 **5,911** token，p50 **2,176**，p90 **26,724**，最大 **32,768**。
+本轮新增 89 次调用（1 次命中此前诊断缓存），503,178 completion token / 1,524.78 秒
+= **330 token/s**；无重试、无断流。角色统计及失败用量缺失标记保存在报告 `cost` 段。
+按该吞吐和调用均值外推，P2（30,300 调用）约 **6.28 天**，候选张量
+（571,320 调用）约 **118.45 天**，另加 val 单智能体前沿约 **6.16 天**。
+这是 5 题、hand6 角色混合样本的粗估，不是工期保证，不能外推未实测的并发 8/16。
+用户工期目标为正式张量 **1–2 周**（不含 P2）。下一步用独立配置
+`configs/p2_dm80_90_v2_low_stream32k.yaml` 比较 low + 流式/32k，再对合适条件测并发 8/16。
+保留 val=1,350、R=1/2 两个方案，按实测方差决定；全量 P2 尚未启动。
+
+`cost` 统计每次物理尝试并保留未知用量；纯缓存重放时 fresh=0、吞吐和工期为 null。
+`power.observed_repeats` 标记实测方差对应的 R；R≥2 时 `repeat_projection` 报题内/题间
+分量及 R=1/2/4 的题量需求，假设图间及各次采样噪声独立，负的题间估计截为零并保留原值。
+尚未实际运行两次采样时不推断这些分量，也不据此冻结 val 的题数与重复次数。
+
+截断诊断保留原始极差，同时给出同题行标签置换的 95% 参考极差（同题的重复采样放在一起）。
+至少 30 题时，仅在同时超过实际阈值和噪声参考时触发差异门槛；小冒烟显示 n/a。
+这依赖零假设下行标签可交换，不拒绝零假设不等于证明截断差小于 3pp。
+P2 另检查总截断率；张量门槛合并四个 split，各 split 仅作诊断。不得据小样本原始极差追着噪声加上限。
+
 
 2026-10-19 已下载完整 10 个分片（103,022 题，源版本
 `5cf055d1fe3d7a2eb19719ac020211469736ae44`）。v2 过滤及去重后，`[8.5,9.0)`
@@ -179,7 +201,7 @@ DeepSeek-V4.1-Flash、温度 0.7、每节点 8192 token、思考用 gateway 默�
 **悬着的一个决定：主格用哪个难度档。** MATH Level 4–5 对 2026 的思考模型已饱和
 （单智能体 0.91–0.93），所以换成带连续难度字段的 DeepMath-103K。实测：
 
-| 难度档 | 单智能体 p | 生成长度中位数 | 全量张量工期 |
+| 难度档 | 单智能体 p | 生成长度中位数 | 历史张量工期（旧题池/旧规模/旧条件） |
 | --- | --- | --- | --- |
 | 7.0 | 0.769 | 1001 | 2.7 天 |
 | 8.0 | 0.795 | 2492 | 6.8 天 |

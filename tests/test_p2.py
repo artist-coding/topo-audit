@@ -170,7 +170,7 @@ def test_unevaluated_gates_are_null_and_display_na():
     assert report["gates"]["capacity_positive"]["pass"] is None
     report = summarize_probe(records, single, graphs, ids, budget_tokens=100)
     assert report["gates"]["capacity_positive"]["pass"] is False
-    assert report["gates"]["row_truncation_spread"]["pass"] is True
+    assert report["gates"]["row_truncation_spread"]["pass"] is None
 
 
 def test_math_probe_checks_size_after_excluding_assigned_tasks(tmp_path, monkeypatch):

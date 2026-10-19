@@ -33,6 +33,8 @@ import itertools
 import json
 import pathlib
 import sys
+import time
+from datetime import datetime, timezone
 from collections import Counter
 from typing import Sequence
 
@@ -42,11 +44,13 @@ if __package__ in (None, ""):  # run as a script: make the repo root importable
 import numpy as np  # noqa: E402
 
 from analysis.bootstrap import (  # noqa: E402
+    repeat_variance,
     paired_se,
     paired_variance,
     required_tasks,
     z_value,
 )
+from analysis.probe_diagnostics import cost_summary, truncation_noise
 from data.loaders.deepmath import BAND_WIDTH  # noqa: E402
 from data.loaders.math import Task, load_pool, tasks_from_frame  # noqa: E402
 from runtime.cache import key_for  # noqa: E402
@@ -150,6 +154,7 @@ def summarize_probe(records, single_runs: Sequence[StrategyRun],
                     epsilons: Sequence[float] = (0.02, 0.03, 0.04),
                     top_gap: float = 0.02, old_gate: float = 0.05,
                     max_row_truncation_spread: float | None = 0.03,
+                    max_truncation_rate: float = 0.15,
                     splits: int = 50, seed: int = 20261018, repeats: int = 1) -> dict:
     """Everything P2 decides on, from the probe's records. Pure: no endpoint."""
     task_ids = list(task_ids)
@@ -194,11 +199,37 @@ def summarize_probe(records, single_runs: Sequence[StrategyRun],
                              for eps in epsilons} if variance > 0 else {},
     }
 
+    power["observed_repeats"] = repeats
+    power["repeat_projection"] = None
+    if repeats >= 2:
+        by_cell = {(r.exec_hash, r.task_id, r.repeat): r.score for r in records}
+        values = {label: np.array([[by_cell[graphs[label].exec_hash, tid, rep]
+                                   for rep in range(repeats)] for tid in task_ids])
+                  for label in top}
+        within = float(np.mean([repeat_variance(np.array([values[a]])) +
+                                repeat_variance(np.array([values[b]]))
+                                for a, b in itertools.combinations(top, 2)]))
+        between_raw = variance - within / repeats
+        between = max(0., between_raw)
+        power["repeat_projection"] = {
+            "within_task_variance": within, "between_task_variance_raw": between_raw,
+            "between_task_variance": between, "between_clipped": between_raw < 0,
+            "assumptions": "Independent sampling noise between graphs and repeats; top pairs selected on this probe. Negative between estimate clipped to zero.",
+            "by_repeats": {str(r): {"variance": between + within / r,
+                "val_tasks_needed": {f"{eps:.2f}": required_tasks(eps, variance=between + within/r)
+                                     for eps in epsilons} if between + within/r > 0 else {}}
+                for r in (1, 2, 4)}}
+
     truncation = [stats[label]["truncation_rate"] for label in ranked]
     trunc = {"min_row": min(truncation), "max_row": max(truncation),
              "spread": max(truncation) - min(truncation),
              "spread_ok": (None if max_row_truncation_spread is None else
                            max(truncation) - min(truncation) <= max_row_truncation_spread)}
+
+    noise = truncation_noise(records, max_row_truncation_spread)
+    trunc.update(noise_reference=noise, raw_spread_ok=trunc["spread_ok"],
+                 spread_ok=noise["spread_ok"],
+                 overall=float(np.mean([bool(r.truncated_nodes) for r in records])))
 
     capacity = _capacity(rows, single_runs, task_ids, budget_tokens
                          if budget_tokens is not None
@@ -227,6 +258,8 @@ def summarize_probe(records, single_runs: Sequence[StrategyRun],
                 "pass": (capacity["cross_fitted"] > 0
                          if "cross_fitted" in capacity else None)},
             "row_truncation_spread": {"pass": trunc["spread_ok"]},
+            "overall_truncation": {"threshold": max_truncation_rate,
+                                   "pass": trunc["overall"] <= max_truncation_rate},
         },
     }
 
@@ -289,6 +322,10 @@ def run_probe(config: dict, executor, runner: SingleAgentRunner | None,
 
     from audit.run_audit import build_tensor
 
+    started = time.monotonic()
+    started_utc = datetime.now(timezone.utc).isoformat()
+    before_ids = {r.run_id for r in executor.cache.export(executor.exp)}
+    before_ids.update(r.run_id for r in executor.cache.export_attempts(executor.exp))
     task_ids = [t.task_id for t in tasks]
     if repeats < 1 or len(task_ids) < 2 or len(set(task_ids)) != len(task_ids):
         raise ValueError("P2 needs positive repeats and at least two distinct tasks")
@@ -330,7 +367,8 @@ def run_probe(config: dict, executor, runner: SingleAgentRunner | None,
         records, single_runs, graphs, [t.task_id for t in tasks],
         budget_tokens=budget_tokens, repeats=repeats,
         val_tasks=config.get("splits", {}).get("val", 300),
-        max_row_truncation_spread=config["acceptance"].get("max_row_truncation_spread"))
+        max_row_truncation_spread=config["acceptance"].get("max_row_truncation_spread"),
+        max_truncation_rate=config["acceptance"].get("max_truncation_rate", .15))
     summary["single_agent_frontier"] = [
         {"strategy": p.strategy, "param": p.param, "accuracy": p.accuracy,
          "mean_tokens": p.mean_tokens} for p in _accumulate(single_runs)]
@@ -344,6 +382,15 @@ def run_probe(config: dict, executor, runner: SingleAgentRunner | None,
                 "draws counted once); fresh excludes cache hits. Historical unscored "
                 "topology attempts are reported separately under topology.",
     }
+    all_records = list(executor.cache.export(executor.exp)) + list(executor.cache.export_attempts(executor.exp))
+    relevant = [r for r in all_records if r.task_id in wanted and
+                ((r.exec_hash in hashes and r.repeat < repeats and r.seed == executor.sample_seed)
+                 or r.split_role == "pi_single")]
+    summary["cost"] = cost_summary(relevant, config,
+        fresh_run_ids={r.run_id for r in relevant} - before_ids,
+        wall_s=time.monotonic() - started, concurrency=concurrency)
+    summary["cost"].update(started_utc=started_utc,
+                           finished_utc=datetime.now(timezone.utc).isoformat())
     return summary
 
 
