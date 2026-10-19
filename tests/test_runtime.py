@@ -609,3 +609,54 @@ def test_scoped_bindings_do_not_disturb_the_main_experiment(tmp_path):
     cache.bind_experiment({"a": 1})
     with pytest.raises(ValueError, match="pi_single"):
         cache.bind_experiment({"selfcheck": "v2"}, scope="pi_single")
+
+
+def stream_bytes(*chunks, done=True):
+    events = [': heartbeat\n\n'] + ['data: ' + json.dumps(c) + '\n\n' for c in chunks]
+    if done:
+        events.append('data: [DONE]\n\n')
+    return io.BytesIO(''.join(events).encode())
+
+
+def test_stream_transport_accounts_usage_and_ignores_reasoning(tmp_path, tasks, monkeypatch):
+    endpoint = http_endpoint(tmp_path, stream=True)
+    usage = {'prompt_tokens': 11, 'completion_tokens': 7,
+             'completion_tokens_details': {'reasoning_tokens': 5}}
+    def open_mock(request, timeout):
+        payload = json.loads(request.data)
+        assert payload['stream'] is True
+        assert payload['stream_options'] == {'include_usage': True}
+        return stream_bytes(
+            {'choices': [{'index': 0, 'delta': {'reasoning_content': 'private reasoning'}}]},
+            {'choices': [{'index': 0, 'delta': {'content': 'answer'}}]},
+            {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'length'}]},
+            {'choices': [], 'usage': usage})
+    monkeypatch.setattr(endpoint._opener, 'open', open_mock)
+    record = executor_at(tmp_path, endpoint).run(topology(), tasks[0], 7, 0)
+    assert record.gen_tokens == 7 and record.reasoning_tokens == 5
+    assert record.truncated_nodes == ['n4'] or record.truncated_nodes == ('n4',)
+    assert record.endpoint_usage == {'n4': [usage]}
+
+
+@pytest.mark.parametrize('missing', ['done', 'finish', 'usage'])
+def test_incomplete_stream_retries_without_caching(tmp_path, tasks, monkeypatch, missing):
+    endpoint = http_endpoint(tmp_path, stream=True)
+    chunks = [{'choices': [{'index': 0, 'delta': {'content': 'partial'}}]}]
+    if missing != 'finish':
+        chunks.append({'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})
+    if missing != 'usage':
+        chunks.append({'choices': [], 'usage': {'prompt_tokens': 3, 'completion_tokens': 4}})
+    monkeypatch.setattr(endpoint._opener, 'open',
+                        lambda *a, **kw: stream_bytes(*chunks, done=missing != 'done'))
+    executor = executor_at(tmp_path, endpoint)
+    with pytest.raises(ExecutionError) as caught:
+        executor.run(topology(), tasks[0], 7, 0)
+    assert executor.cache.stats()['writes'] == 0
+    assert caught.value.record.attempts == 3
+    assert caught.value.record.gen_tokens == (0 if missing == 'usage' else 12)
+
+
+def test_stream_setting_is_bound_to_cache(tmp_path):
+    executor_at(tmp_path, http_endpoint(tmp_path, stream=True))
+    with pytest.raises(ValueError):
+        executor_at(tmp_path, http_endpoint(tmp_path, stream=False))

@@ -148,6 +148,7 @@ class Executor:
             "train_repeats": train_repeats, "templates": self._templates,
             "aggregation": AGGREGATION_CONCAT_RERASON,
             **({"request_options": request_options} if request_options else {}),
+            **({"stream": True} if getattr(endpoint, "stream", False) else {}),
         })
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._hits: dict[tuple[int, str, str], int] = {}

@@ -13,6 +13,7 @@ mean zero reasoning.
 from __future__ import annotations
 
 import ipaddress
+import http.client
 import json
 import logging
 import math
@@ -52,7 +53,7 @@ class Endpoint(Protocol):
 
 #: Fields every request sets itself; request_options may not override them.
 RESERVED_FIELDS = frozenset({"model", "messages", "n", "seed", "max_tokens",
-                             "temperature", "stream"})
+                             "temperature", "stream", "stream_options"})
 
 
 def validate_request_options(options: Mapping[str, object] | None) -> dict:
@@ -141,6 +142,14 @@ class EndpointError(RuntimeError):
         self.attempts = attempts
 
 
+class EndpointStreamError(OSError):
+    """An incomplete HTTP-200 stream; preserve any usage received before failure."""
+
+    def __init__(self, raw_usage: dict):
+        super().__init__("incomplete or invalid completion stream")
+        self.raw_usage = raw_usage
+
+
 class _RetryingEndpoint:
     def __init__(self, name: str, *, max_concurrency: int, max_attempts: int,
                  backoff_s: Iterable[float], sleep: Callable[[float], None] = time.sleep,
@@ -199,6 +208,9 @@ class _RetryingEndpoint:
                 failure = exc
                 status_code, raw_usage = exc.status_code, exc.raw_usage
                 retryable = status_code in (408, 429) or 500 <= status_code < 600
+            except EndpointStreamError as exc:
+                failure, retryable = exc, True
+                status_code, raw_usage = 200, exc.raw_usage
             except (urllib.error.URLError, OSError) as exc:
                 failure, retryable = exc, True
             except (ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -279,11 +291,15 @@ class OpenAICompatEndpoint(_RetryingEndpoint):
                  max_attempts: int, backoff_s: Iterable[float], timeout_s: float,
                  api_key_env: str = "LLM_GATEWAY_API_KEY", env_file: str | Path = ".env",
                  sleep: Callable[[float], None] = time.sleep,
-                 request_options: Mapping[str, object] | None = None):
+                 request_options: Mapping[str, object] | None = None,
+                 stream: bool = False):
         super().__init__(name, max_concurrency=max_concurrency,
                          max_attempts=max_attempts, backoff_s=backoff_s, sleep=sleep,
                          request_options=request_options)
         self.base_url = _validate_url(base_url)
+        if type(stream) is not bool:
+            raise ValueError("stream must be boolean")
+        self.stream = stream
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         self._timeout_s = timeout_s
@@ -297,6 +313,9 @@ class OpenAICompatEndpoint(_RetryingEndpoint):
             urllib.request.ProxyHandler({}), _NoRedirects())
 
     def _request(self, payload: dict) -> dict:
+        if self.stream:
+            payload = {**payload, "stream": True,
+                       "stream_options": {"include_usage": True}}
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -305,7 +324,7 @@ class OpenAICompatEndpoint(_RetryingEndpoint):
             data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
         try:
             with self._opener.open(request, timeout=self._timeout_s) as response:
-                return json.load(response)
+                return self._read_stream(response) if self.stream else json.load(response)
         except urllib.error.HTTPError as exc:
             try:
                 body = json.loads(exc.read())
@@ -317,6 +336,43 @@ class OpenAICompatEndpoint(_RetryingEndpoint):
             finally:
                 exc.close()
             raise EndpointHTTPError(exc.code, usage) from exc
+
+    @staticmethod
+    def _read_stream(response) -> dict:
+        content, data = [], []
+        usage, finish = {}, None
+        try:
+            for raw_line in response:
+                line = raw_line.decode("utf-8").rstrip("\r\n")
+                if line.startswith("data:"):
+                    data.append(line[5:].lstrip(" "))
+                elif not line and data:
+                    event = "\n".join(data)
+                    data.clear()
+                    if event == "[DONE]":
+                        if finish is None or not usage:
+                            raise EndpointStreamError(usage)
+                        return {"choices": [{"message": {"content": "".join(content)},
+                                             "finish_reason": finish}], "usage": usage}
+                    chunk = json.loads(event)
+                    if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
+                        usage = chunk["usage"]
+                    if "error" in chunk:
+                        raise EndpointStreamError(usage)
+                    for choice in chunk.get("choices", []):
+                        if choice.get("index") != 0:
+                            raise EndpointStreamError(usage)
+                        text = choice.get("delta", {}).get("content")
+                        if text is not None:
+                            if not isinstance(text, str) or finish is not None:
+                                raise EndpointStreamError(usage)
+                            content.append(text)
+                        if choice.get("finish_reason") is not None:
+                            finish = choice["finish_reason"]
+            raise EndpointStreamError(usage)
+        except (OSError, http.client.HTTPException, ValueError, KeyError,
+                TypeError, AttributeError) as exc:
+            raise EndpointStreamError(usage) from exc
 
 
 class MockEndpoint(_RetryingEndpoint):
@@ -365,12 +421,15 @@ def endpoint_from_config(model: Mapping, *, concurrency: int | None = None,
     """The one place a config's `model:` block becomes an endpoint."""
     options = model.get("request_options") or {}
     if replay_only:
-        return ReplayOnlyEndpoint(model["name"], base_url=model["endpoint"],
-                                  request_options=options)
+        endpoint = ReplayOnlyEndpoint(model["name"], base_url=model["endpoint"],
+                                      request_options=options)
+        endpoint.stream = model.get("stream", False)
+        return endpoint
     retry = model["retry"]
     return OpenAICompatEndpoint(
         name=model["name"], base_url=model["endpoint"],
         api_key_env=model.get("api_key_env", "LLM_GATEWAY_API_KEY"),
         max_concurrency=concurrency or model["max_concurrency"],
         max_attempts=retry["max_attempts"], backoff_s=retry["backoff_s"],
-        timeout_s=model.get("timeout_s", 900), request_options=options)
+        timeout_s=model.get("timeout_s", 900), request_options=options,
+        stream=model.get("stream", False))

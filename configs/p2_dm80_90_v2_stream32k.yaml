@@ -1,0 +1,111 @@
+# Diagnostic only: default reasoning, streaming, larger cap.
+exp: p2_dm80_90_v2_stream32k
+model:
+  name: DeepSeek
+  endpoint: http://aimaster-llm-gateway-service.aimaster-web:8080/llm/v1
+  api_key_env: LLM_GATEWAY_API_KEY
+  bypass_proxy: true
+  max_concurrency: 8
+  temperature: 0.7
+  max_tokens_per_node: 32768
+  request_options: {}
+  timeout_s: 900
+  retry:
+    max_attempts: 3
+    backoff_s:
+    - 1
+    - 4
+    - 16
+  stream: true
+task:
+  family: deepmath
+  subset: difficulty_[8.0,9.0)_nonbinary_v2
+  splits: data/splits/deepmath_b8.0_w1.0_v2.json
+  raw: data/raw/deepmath_full_5cf055d1fe3d.parquet
+  deepmath_raw: data/raw/deepmath_full_5cf055d1fe3d.parquet
+  band:
+  - 8.0
+  - 9.0
+  answer_filter: normalized_nonbinary_v2
+space:
+  id: s0
+  report_nested_strict: true
+  aggregation: concat_rereason
+splits:
+  train: 256
+  audit: 300
+  val: 1350
+  test: 1000
+tensor:
+  repeats:
+    train: 8
+    audit: 2
+    val: 2
+    test: 1
+  key: exec_hash
+  sample_seed: 0
+  repeat_index: hash_then_linear_probe(seed, exec_hash, task_id, hit_index, repeats.train)
+optimizers:
+- random_search
+- reinforce_edge
+- prune_from_dense
+- greedy_local
+budget:
+  max_evals: 200
+  tasks_per_eval: 24
+  replay_only: true
+  checkpoints: every_step
+  report_at:
+  - 25
+  - 200
+seeds:
+- 0
+- 1
+- 2
+- 3
+- 4
+- 5
+- 6
+- 7
+- 8
+- 9
+- 10
+- 11
+- 12
+- 13
+- 14
+- 15
+- 16
+- 17
+- 18
+- 19
+plateau:
+  epsilon: 2.0
+  delta_t: 50
+  distinguish_frozen: true
+single_agent:
+  strategies:
+  - cot
+  - self_consistency
+  - best_of_n_selfcheck
+  - self_refine
+  budget_sweep:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 8
+  headline_budget: s0_token_median
+bootstrap:
+  iterations: 2000
+reinforce_edge:
+  group_size: 8
+  lr: 0.1
+  theta_clip: 4.0
+  entropy_reg: 0.01
+acceptance:
+  identity_tolerance: 1.0e-09
+  max_truncation_rate: 0.15
+  max_row_truncation_spread: 0.03
+  token_reconciliation_error: 0.01

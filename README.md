@@ -156,6 +156,17 @@ python3 scripts/p2_spread.py --config configs/p2_dm80_90_v2.yaml --pool deepmath
 `smoke_report.json` 与 low/16k 的 `smoke_diagnostic.json`；全量 P2 和正式 E0 均未启动。
 下一步先排查服务端 502/超时限制，再在独立实验中验证足够的 token 上限，
 通过完整冒烟后才启动 150 题全量 P2。同一条件可以缓存续跑；参数变更必须换实验名。
+客户端现支持 `model.stream: true`：请求流式输出及最终用量，逐段拼接答案；
+缺少结束标记、终止原因或用量时不得写入成功缓存。断流按重试策略处理，已收到的用量
+保留在失败调用账本中（未收到的用量仍未知）。该选项也进入实验绑定，重放保持一致。
+诊断配置 `configs/p2_dm80_90_v2_stream32k.yaml` 保留默认思考，使用流式传输与 32k 上限，
+此前失败的题目已在该条件下一次调用完成：313.58 秒、28,843 token，答案正确且无截断。
+这验证了单个长请求可以超过此前约 120 秒的失败点，尚不代表所有图或题目都能通过；
+下一步运行同一快照、同一种子的 5 题 × hand6 冒烟，验收后再决定全量 P2。
+
+```bash
+python3 scripts/p2_spread.py --config configs/p2_dm80_90_v2_stream32k.yaml --pool deepmath --band 8.0 --band-width 1.0 --exp p2_dm80_90_v2_stream32k --n 5 --graphs hand6 --no-single --concurrency 4
+```
 提高上限或改变思考强度后的结果不能与原条件合并。旧 P1 数字也不能替代新条件 P2。
 
 `--band-width` 同样适用于下载后的频次检查、`python3 -m data.loaders.deepmath` 和
