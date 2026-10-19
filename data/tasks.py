@@ -62,8 +62,8 @@ def load_split_tasks(config: dict, roles: Sequence[str]) -> dict[str, list[Task]
 
 
 def _load_deepmath(config: dict, split: dict, roles: Sequence[str]) -> dict[str, list[Task]]:
-    low, _ = split["band"]
-    pool = load_band(config["task"].get("raw", DEEPMATH_RAW), low)
+    low, high = split["band"]
+    pool = load_band(config["task"].get("raw", DEEPMATH_RAW), low, high - low)
     answers = split["answers"]
     out: dict[str, list[Task]] = {}
     for role in roles:

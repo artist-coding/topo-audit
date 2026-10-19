@@ -128,3 +128,33 @@ def test_p1_thinking_pools_keep_the_expected_columns(tmp_path, monkeypatch):
     for label in ("DeepMath 7.0", "DeepMath 8.5"):
         assert list(pools[label].columns) == ["task_id", "problem", "answer"]
         assert set(pools[label].answer) == {"2", "3"}
+
+
+def test_wide_band_probe_and_split_loader_use_the_same_pool(fake_parquet, tmp_path):
+    from scripts.p2_spread import probe_tasks
+
+    config = {"task": {"deepmath_raw": "x"}}
+    small = probe_tasks(config, "deepmath", 5, 19, 8.0, width=1.0)
+    probe = probe_tasks(config, "deepmath", 20, 19, 8.0, width=1.0)
+    assert [t.task_id for t in small] == [t.task_id for t in probe[:5]]
+    excluded = frozenset(t.task_id for t in probe)
+    split = build_deepmath(3, 30, 30, 30, 30, 8.0, raw="x", width=1.0, exclude=excluded)
+    assert split["band"] == [8.0, 9.0]
+    assert split["pool_sizes"]["band_pool"] == 200
+    path = tmp_path / "split.json"
+    path.write_text(json.dumps(split))
+    loaded = load_split_tasks({"task": {"raw": "x", "splits": str(path)}},
+                              ["train", "audit", "val", "test"])
+    tasks = [t for role in loaded.values() for t in role]
+    assert len(tasks) == 120
+    assert {t.meta["difficulty"] for t in tasks} == {8.0, 8.5}
+    assert not {t.task_id for t in tasks} & excluded
+    narrow = build_deepmath(3, 10, 10, 10, 10, 8.0, raw="x")
+    assert narrow["band"] == [8.0, 8.5]
+    assert narrow["fingerprint"] != split["fingerprint"]
+
+
+@pytest.mark.parametrize("width", [0, -1, float("nan"), float("inf")])
+def test_invalid_band_width_is_rejected(width):
+    with pytest.raises(ValueError, match="width"):
+        in_band(pd.Series([8.0, 8.5, 9.0]), 8.0, width)

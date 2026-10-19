@@ -47,6 +47,7 @@ from analysis.bootstrap import (  # noqa: E402
     required_tasks,
     z_value,
 )
+from data.loaders.deepmath import BAND_WIDTH  # noqa: E402
 from data.loaders.math import Task, load_pool, tasks_from_frame  # noqa: E402
 from runtime.cache import key_for  # noqa: E402
 from runtime.single_agent import SingleAgentRunner, StrategyRun, _accumulate  # noqa: E402
@@ -67,7 +68,7 @@ HAND6 = {
 # ----------------------------------------------------------------- problems
 
 def probe_tasks(config: dict, pool: str, n: int, seed: int,
-                band: float | None = None) -> list[Task]:
+                band: float | None = None, width: float = BAND_WIDTH) -> list[Task]:
     """n problems held out of every committed split (MATH) or from one DeepMath band."""
     rng = np.random.default_rng(seed)
     if pool == "math":
@@ -86,7 +87,7 @@ def probe_tasks(config: dict, pool: str, n: int, seed: int,
 
         if band is None:
             raise SystemExit("--band is required for the deepmath pool")
-        frame = load_band(config["task"].get("deepmath_raw", DEFAULT_RAW), band)
+        frame = load_band(config["task"].get("deepmath_raw", DEFAULT_RAW), band, width)
         if len(frame) < n:
             raise SystemExit(f"DeepMath band {band} has {len(frame)} non-binary problems "
                              f"< requested {n}; download more shards or reduce --n")
@@ -362,6 +363,7 @@ def main() -> None:
     ap.add_argument("--config", default="configs/e0.yaml")
     ap.add_argument("--pool", choices=("math", "deepmath"), default="math")
     ap.add_argument("--band", type=float, default=None, help="DeepMath band lower edge")
+    ap.add_argument("--band-width", type=float, default=BAND_WIDTH)
     ap.add_argument("--n", type=int, default=150)
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--graphs", choices=("all", "hand6"), default="all")
@@ -376,6 +378,8 @@ def main() -> None:
     config = yaml.safe_load(pathlib.Path(args.config).read_text())
     model = config["model"]
     exp = args.exp or f"p2_{args.pool}" + (f"_{args.band}" if args.band is not None else "")
+    if args.exp is None and args.pool == "deepmath" and args.band_width != BAND_WIDTH:
+        exp += f"_w{args.band_width}"
     endpoint = endpoint_from_config(model, concurrency=args.concurrency)
     cache = RunCache(pathlib.Path("runs") / exp / "cache.sqlite", exp=exp)
     executor = Executor(endpoint, cache, max_tokens_per_node=model["max_tokens_per_node"],
@@ -386,7 +390,7 @@ def main() -> None:
         temperature=model["temperature"],
         samples=max(int(k) for k in config["single_agent"]["budget_sweep"]),
         output_dir="runs")
-    tasks = probe_tasks(config, args.pool, args.n, args.seed, args.band)
+    tasks = probe_tasks(config, args.pool, args.n, args.seed, args.band, args.band_width)
     graphs = probe_graphs(model["name"], args.graphs)
     print(f"P2: {len(graphs)} computations x {len(tasks)} problems x {args.repeats} "
           f"repeat(s){'' if runner is None else ' + pi_single frontier'} -> exp {exp}")

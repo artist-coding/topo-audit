@@ -37,7 +37,7 @@ import pandas as pd
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from data.loaders.deepmath import (  # noqa: E402
-    ANSWER_FILTER, DEFAULT_RAW as DEEPMATH_RAW, answer_profile, load_band,
+    ANSWER_FILTER, BAND_WIDTH, DEFAULT_RAW as DEEPMATH_RAW, answer_profile, load_band,
 )
 from data.loaders.math import load_pool, task_id_for  # noqa: E402
 
@@ -132,9 +132,9 @@ def build(
 
 def build_deepmath(seed: int, n_train: int, n_audit: int, n_val: int, n_test: int,
                    band: float, raw: str = DEEPMATH_RAW,
-                   exclude: frozenset[str] = frozenset()) -> dict:
+                   exclude: frozenset[str] = frozenset(), width: float = BAND_WIDTH) -> dict:
     """Four disjoint roles from one DeepMath band."""
-    full = load_band(raw, band)
+    full = load_band(raw, band, width)
     pool = full[~full["task_id"].isin(exclude)].reset_index(drop=True)
     need = n_train + n_audit + n_val + n_test
     if len(pool) < need:
@@ -150,7 +150,7 @@ def build_deepmath(seed: int, n_train: int, n_audit: int, n_val: int, n_test: in
         "family": "deepmath",
         "answer_filter": ANSWER_FILTER,
         "seed": seed,
-        "band": [band, band + 0.5],
+        "band": [band, band + width],
         "source": {"all_roles": "zwhe99/DeepMath-103K (single source split)"},
         "sizes": {role: len(v) for role, v in ids.items()},
         "pool_sizes": {"band_pool": len(full), "excluded_p2": len(full) - len(pool),
@@ -177,6 +177,8 @@ def main() -> None:
     ap.add_argument("--val", type=int, default=300)
     ap.add_argument("--test", type=int, default=1000)
     ap.add_argument("--band", type=float, default=None, help="DeepMath band lower edge")
+    ap.add_argument("--band-width", type=float, default=BAND_WIDTH)
+    ap.add_argument("--raw", default=DEEPMATH_RAW, help="DeepMath raw parquet snapshot")
     ap.add_argument("--exclude-p2", type=pathlib.Path, default=None,
                     help="p2_report.json whose probe problems must stay out of every role")
     ap.add_argument("--out", type=pathlib.Path, default=None)
@@ -185,13 +187,14 @@ def main() -> None:
     if args.family == "deepmath":
         if args.band is None:
             raise SystemExit("--band is required for --family deepmath")
-        print(json.dumps(answer_profile(DEEPMATH_RAW, args.band), indent=2,
+        print(json.dumps(answer_profile(args.raw, args.band, args.band_width), indent=2,
                          ensure_ascii=False), flush=True)
         exclude = frozenset(json.loads(args.exclude_p2.read_text())["task_ids"]
                             if args.exclude_p2 else ())
         payload = build_deepmath(args.seed, args.train, args.audit, args.val, args.test,
-                                 args.band, exclude=exclude)
-        out = args.out or pathlib.Path(f"data/splits/deepmath_b{args.band}_v1.json")
+                                 args.band, raw=args.raw, exclude=exclude, width=args.band_width)
+        suffix = "" if args.band_width == BAND_WIDTH else f"_w{args.band_width}"
+        out = args.out or pathlib.Path(f"data/splits/deepmath_b{args.band}{suffix}_v1.json")
     else:
         payload = build(args.seed, args.train, args.audit, args.val, args.test)
         out = args.out or DEFAULT_OUT

@@ -24,6 +24,11 @@
 
 ## 硬规则（不要违反）
 
+- 10-19 本轮 P2 固定为全量 10 分片、v2 过滤后的 `[8.0,9.0)`（8,157 题）；
+  `[8.5,9.0)` 实际只有 1,423 题，不够原定划分。配置为 `configs/p2_dm80_90_v2.yaml`，
+  题池快照与抽样 ID 在 `runs/p2_dm80_90_v2/protocol.json`。P2 150 题、重复 2 次、
+  并发 8（冒烟 4）；val 候选 1,350×2，test 保留 1,000。ε=2 仅为精度目标，
+  正式 E0 配置/划分须验收 P2 后再冻结。P2 以后不得换题池再沿用其分差/方差结论。
 - DeepMath 的 P1 / P2 / 正式划分共用 `load_band()`：剥掉 boxed 包装、经 `normalize_answer`
   归一化后剔除空答案、Yes/No/True/False、converges/diverges/convergent/divergent 标签。
   版本为 `normalized_nonbinary_v2`，不会自动识别所有二选一题；先用

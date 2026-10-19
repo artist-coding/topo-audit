@@ -130,6 +130,23 @@ python3 analysis/report.py --config configs/e0.yaml        # report.json + decom
 
 ## 现状
 
+2026-10-19 已下载完整 10 个分片（103,022 题，源版本
+`5cf055d1fe3d7a2eb19719ac020211469736ae44`）。v2 过滤及去重后，`[8.5,9.0)`
+只有 1,423 题，无法容纳原定四角色划分；`[8.0,9.0)` 有 8,157 题。
+本轮 P2 因此固定宽题池，使用 `configs/p2_dm80_90_v2.yaml`，150 道留出题、每格两次采样。
+验证集候选为 1,350 题 × 2，测试集保留 1,000 题；ε=2 分是待验证的精度目标。
+正式 E0 划分和配置尚未生成，须先验收 P2。题池快照、SHA256、抽样 ID 和参数记录在
+`runs/p2_dm80_90_v2/protocol.json`；原始三个分片数据另有备份。
+
+```bash
+# 同一数据快照、同一个种子，5 题和 hand6 都包含在全量 P2 中
+python3 scripts/p2_spread.py --config configs/p2_dm80_90_v2.yaml --pool deepmath --band 8.0 --band-width 1.0 --exp p2_dm80_90_v2 --n 5 --graphs hand6 --no-single --concurrency 4
+python3 scripts/p2_spread.py --config configs/p2_dm80_90_v2.yaml --pool deepmath --band 8.0 --band-width 1.0 --exp p2_dm80_90_v2 --n 150 --graphs all --repeats 2 --concurrency 8
+```
+
+`--band-width` 同样适用于下载后的频次检查、`python3 -m data.loaders.deepmath` 和
+`data/make_splits.py`；划分文件记录上下界，后续所有驱动按该范围加载。
+
 七步都有驱动和 mock 单测；真端点只跑过冒烟（250 格、0 失败、0% 截断）。模型条件已确认：
 DeepSeek-V4.1-Flash、温度 0.7、每节点 8192 token、思考用 gateway 默认。
 

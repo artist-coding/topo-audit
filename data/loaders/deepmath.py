@@ -10,6 +10,7 @@ edge. Closed intervals put every problem rated exactly on a boundary into two ba
 
 from __future__ import annotations
 
+import math
 from typing import Iterator
 
 import pandas as pd
@@ -58,6 +59,8 @@ def answer_profile(path: str, low: float, width: float = BAND_WIDTH, top: int = 
 
 
 def in_band(difficulty: pd.Series, low: float, width: float = BAND_WIDTH) -> pd.Series:
+    if not math.isfinite(low) or not math.isfinite(width) or width <= 0:
+        raise ValueError("band lower bound must be finite and width positive and finite")
     high = low + width
     upper = difficulty <= high if high >= difficulty.max() else difficulty < high
     return (difficulty >= low) & upper
@@ -91,5 +94,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inspect DeepMath answer frequencies without generating splits")
     parser.add_argument("--raw", default=DEFAULT_RAW)
     parser.add_argument("--band", type=float, required=True)
+    parser.add_argument("--band-width", type=float, default=BAND_WIDTH)
     args = parser.parse_args()
-    print(json.dumps(answer_profile(args.raw, args.band), indent=2, ensure_ascii=False))
+    print(json.dumps(answer_profile(args.raw, args.band, args.band_width), indent=2,
+                     ensure_ascii=False))
