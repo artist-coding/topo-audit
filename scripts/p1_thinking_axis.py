@@ -33,7 +33,8 @@ import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from data.loaders.math import PROMPT_TEMPLATE, load_pool, score_output, task_id_for
+from data.loaders.deepmath import load_band
+from data.loaders.math import PROMPT_TEMPLATE, load_pool, score_output
 
 BASE = "http://aimaster-llm-gateway-service.aimaster-web:8080/llm/v1"
 OUT = pathlib.Path("runs/probe/p1_thinking_axis.json")
@@ -94,11 +95,8 @@ def pools(n: int) -> dict[str, pd.DataFrame]:
 
     deepmath = pathlib.Path("data/raw/deepmath.parquet")
     if deepmath.exists():
-        frame = pd.read_parquet(deepmath)
-        frame["task_id"] = frame["question"].map(task_id_for)
-        frame = frame.drop_duplicates(subset="task_id")
         for low in (7.0, 8.5):
-            band = frame[(frame["difficulty"] >= low) & (frame["difficulty"] <= low + 0.5)]
+            band = load_band(deepmath, low)
             sample = band.iloc[rng.permutation(len(band))[:n]]
             out[f"DeepMath {low}"] = sample.rename(
                 columns={"question": "problem", "final_answer": "answer"})[

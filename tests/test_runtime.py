@@ -195,7 +195,18 @@ def test_repeat_hint_and_counts_are_scoped_by_seed_computation_and_task(tmp_path
     assert evaluation.gen_tokens == sum(record.gen_tokens for record in records)
     executor.evaluate_batch([graph], tasks[:1], seed=6, repeat_hint=0)
     other.evaluate_batch([graph], tasks[:1], seed=6, repeat_hint=0)
-    assert endpoint.calls[-1]["payload"] == other_endpoint.calls[-1]["payload"]
+    # A new search seed starts its own counter at hit 0 in both executors, whatever
+    # seed 5 consumed, so both request the same tensor cell. (Comparing "the last
+    # endpoint call" instead depended on whether that cell happened to be cached
+    # already, i.e. on the exec_hash.)
+    h, t0 = graph.exec_hash, tasks[0].task_id
+    assert executor._hits[(5, h, t0)] == 4 and other._hits[(5, h, t0)] == 4
+    assert executor._hits[(6, h, t0)] == 1 and other._hits[(6, h, t0)] == 1
+    cell = executor._repeat_index(6, h, t0, 0)
+    assert cell == other._repeat_index(6, h, t0, 0)
+    for ex in (executor, other):
+        assert (h, t0, cell) in {(r.exec_hash, r.task_id, r.repeat)
+                                 for r in ex.cache.export(ex.exp)}
 
 
 @pytest.mark.parametrize("node_index", (0, 1))
@@ -405,8 +416,11 @@ def test_unknown_template_or_mismatched_model_is_rejected_before_calling(tmp_pat
     executor = executor_at(tmp_path, endpoint)
     with pytest.raises(ValueError, match="model"):
         executor.run(topology(model="other"), tasks[0], 0, 0)
-    graph = topology()
-    graph = replace(graph, nodes=(replace(graph.nodes[0], prompt_id="missing.v1"),))
+    # The terminal keeps its declared template only when it has inputs (a lone
+    # Finalizer plays Solver), so plant the unknown template on a fed terminal.
+    graph = topology((("n1", "n4"),))
+    graph = replace(graph, nodes=(graph.nodes[0],
+                                  replace(graph.nodes[1], prompt_id="missing.v1")))
     with pytest.raises(ValueError, match="template"):
         executor.run(graph, tasks[0], 0, 0)
     assert endpoint.call_count == 0
@@ -535,3 +549,63 @@ def test_mock_outputs_are_deterministic_but_repeats_use_different_draws(tmp_path
     assert [call["text"] for call in left.calls] == [call["text"] for call in right.calls]
     assert len({call["payload"]["seed"] for call in left.calls}) == 8
     assert len({call["text"] for call in left.calls}) == 2
+
+
+# ------------------------------------------------- request options and replay-only
+
+def _capturing_transport(name="mock", **kwargs):
+    payloads = []
+
+    def respond(payload):
+        payloads.append(payload)
+        return reply("\\boxed{2}\nFINAL: 2", usage={"prompt_tokens": 3,
+                                                     "completion_tokens": 2})
+    return TransportMock(name, responder=respond, max_concurrency=1, max_attempts=1,
+                         backoff_s=(), **kwargs), payloads
+
+
+def test_request_options_reach_the_payload_and_cannot_override_core_fields(tmp_path, tasks):
+    endpoint, payloads = _capturing_transport(request_options={"reasoning_effort": "none"})
+    executor_at(tmp_path, endpoint).run(topology(), tasks[0], 0, 0)
+    assert payloads[0]["reasoning_effort"] == "none" and payloads[0]["n"] == 1
+    with pytest.raises(ValueError, match="may not set"):
+        _capturing_transport(request_options={"temperature": 0.0})
+
+
+def test_reasoning_effort_is_part_of_the_experiment_identity(tmp_path, tasks):
+    default, _ = _capturing_transport()
+    executor_at(tmp_path, default)
+    off, _ = _capturing_transport(request_options={"reasoning_effort": "none"})
+    with pytest.raises(ValueError, match="new exp"):
+        executor_at(tmp_path, off)
+    # An empty option set leaves the settings blob exactly as before the field existed.
+    import sqlite3
+    settings, = sqlite3.connect(tmp_path / "cache.sqlite").execute(
+        "SELECT settings FROM experiments WHERE exp = 'runtime-test'").fetchone()
+    assert "request_options" not in settings
+
+
+def test_replay_only_endpoint_opens_the_same_experiment_and_never_generates(tmp_path, tasks):
+    from runtime.endpoints import ReplayOnlyEndpoint, endpoint_from_config
+
+    live = MockEndpoint(tasks)
+    executor = executor_at(tmp_path, live)
+    graph = topology((("n1", "n4"),))
+    executor.run(graph, tasks[0], 0, 0)
+    replay = executor_at(tmp_path, ReplayOnlyEndpoint("mock"), replay_only=True)
+    assert replay.run(graph, tasks[0], 0, 0).task_id == tasks[0].task_id
+    with pytest.raises(RuntimeError, match="replay-only"):
+        ReplayOnlyEndpoint("mock").complete("p", seed=0, max_tokens=1, temperature=0.0)
+    # No API key is needed to build a replay endpoint for the gateway.
+    model = {"name": "DeepSeek", "max_concurrency": 1, "retry": {},
+             "endpoint": "http://aimaster-llm-gateway-service.aimaster-web:8080/llm/v1"}
+    assert isinstance(endpoint_from_config(model, replay_only=True), ReplayOnlyEndpoint)
+
+
+def test_scoped_bindings_do_not_disturb_the_main_experiment(tmp_path):
+    cache = RunCache(tmp_path / "c.sqlite", exp="e")
+    cache.bind_experiment({"a": 1})
+    cache.bind_experiment({"selfcheck": "v1"}, scope="pi_single")
+    cache.bind_experiment({"a": 1})
+    with pytest.raises(ValueError, match="pi_single"):
+        cache.bind_experiment({"selfcheck": "v2"}, scope="pi_single")

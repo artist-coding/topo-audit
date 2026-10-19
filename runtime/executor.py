@@ -138,11 +138,16 @@ class Executor:
             if fields != {"task", "inputs"}:
                 raise ValueError("each role template must have only {task} and {inputs} fields")
             template.format(task="", inputs="")
+        # Extra request fields (reasoning effort) change what every call asks for, so
+        # they are part of the experiment. Bound only when set, so caches built with
+        # the gateway default keep their settings blob.
+        request_options = dict(getattr(endpoint, "request_options", None) or {})
         cache.bind_experiment({
             "model": endpoint.name, "endpoint": getattr(endpoint, "base_url", None),
             "max_tokens_per_node": max_tokens_per_node, "temperature": temperature,
             "train_repeats": train_repeats, "templates": self._templates,
             "aggregation": AGGREGATION_CONCAT_RERASON,
+            **({"request_options": request_options} if request_options else {}),
         })
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._hits: dict[tuple[int, str, str], int] = {}

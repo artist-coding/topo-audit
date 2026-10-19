@@ -229,3 +229,16 @@ def test_parents_are_in_execution_order():
 def test_node_execution_count_drives_token_cost():
     space = enumerate_space(S0_ROLES)
     assert sum(t.token_cost_nodes() for t in space) == 118  # 1 + 3*2 + 9*3 + 21*4
+
+
+def test_zero_edge_graph_is_a_lone_solver_and_stays_in_the_strict_space():
+    g_empty = Topology.canonical(_nodes(), [], space_id="s4")
+    assert g_empty.effective_roles() == {"n4": SOLVER}
+    assert g_empty.canonical_form()["nodes"][0]["prompt_id"] == "solver.v1"
+    strict = {t.graph_hash for t in enumerate_space(S0_ROLES, strict_inputs=True)}
+    assert g_empty.graph_hash in strict
+
+
+def test_a_finalizer_with_inputs_keeps_its_role():
+    topo = Topology.canonical(_nodes(), [("n1", "n4")], space_id="s4")
+    assert topo.effective_roles()["n4"] == FINALIZER

@@ -1,9 +1,13 @@
 """One completion per request, with explicit transport and retry accounting.
 
-The gateway cannot disable thinking or return multiple samples. Proxy bypass is
-local to this client's opener: changing os.environ would break concurrent data
-downloads. Raw usage is retained per attempt because a failed request can still
-have consumed tokens, and missing reasoning details do not mean zero reasoning.
+The gateway returns one sample per request (``n > 1`` is rejected). Thinking is on by
+default; P1c found ``reasoning_effort`` controls it (none / low / high / xhigh / max).
+Any such extra request field goes through ``request_options``, which the Executor
+binds into the experiment identity, so a different effort can never share a cache
+with the default. Proxy bypass is local to this client's opener: changing os.environ
+would break concurrent data downloads. Raw usage is retained per attempt because a
+failed request can still have consumed tokens, and missing reasoning details do not
+mean zero reasoning.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Protocol
+from typing import Callable, Iterable, Iterator, Mapping, Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +48,21 @@ class Endpoint(Protocol):
 
     def complete(self, prompt: str, *, seed: int, max_tokens: int,
                  temperature: float) -> CallResult: ...
+
+
+#: Fields every request sets itself; request_options may not override them.
+RESERVED_FIELDS = frozenset({"model", "messages", "n", "seed", "max_tokens",
+                             "temperature", "stream"})
+
+
+def validate_request_options(options: Mapping[str, object] | None) -> dict:
+    """Extra request fields (e.g. reasoning_effort), JSON-safe and non-overlapping."""
+    options = dict(options or {})
+    clash = RESERVED_FIELDS & set(options)
+    if clash:
+        raise ValueError(f"request_options may not set {sorted(clash)}")
+    json.dumps(options, sort_keys=True, allow_nan=False)
+    return options
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,8 +143,10 @@ class EndpointError(RuntimeError):
 
 class _RetryingEndpoint:
     def __init__(self, name: str, *, max_concurrency: int, max_attempts: int,
-                 backoff_s: Iterable[float], sleep: Callable[[float], None] = time.sleep):
+                 backoff_s: Iterable[float], sleep: Callable[[float], None] = time.sleep,
+                 request_options: Mapping[str, object] | None = None):
         self.name = name
+        self.request_options = validate_request_options(request_options)
         self.max_attempts = max_attempts
         self.backoff_s = tuple(backoff_s)
         if max_concurrency < 1 or max_attempts < 1:
@@ -145,7 +166,7 @@ class _RetryingEndpoint:
         payload = {
             "model": self.name, "messages": [{"role": "user", "content": prompt}],
             "n": 1, "seed": seed, "max_tokens": max_tokens,
-            "temperature": temperature,
+            "temperature": temperature, **self.request_options,
         }
         started = time.monotonic()
         attempts: list[CallAttempt] = []
@@ -257,9 +278,11 @@ class OpenAICompatEndpoint(_RetryingEndpoint):
     def __init__(self, name: str, *, base_url: str, max_concurrency: int,
                  max_attempts: int, backoff_s: Iterable[float], timeout_s: float,
                  api_key_env: str = "LLM_GATEWAY_API_KEY", env_file: str | Path = ".env",
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 request_options: Mapping[str, object] | None = None):
         super().__init__(name, max_concurrency=max_concurrency,
-                         max_attempts=max_attempts, backoff_s=backoff_s, sleep=sleep)
+                         max_attempts=max_attempts, backoff_s=backoff_s, sleep=sleep,
+                         request_options=request_options)
         self.base_url = _validate_url(base_url)
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
@@ -306,10 +329,48 @@ class MockEndpoint(_RetryingEndpoint):
 
     def __init__(self, name: str, *, responder: Callable[[dict], dict],
                  max_concurrency: int, max_attempts: int, backoff_s: Iterable[float],
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 request_options: Mapping[str, object] | None = None):
         super().__init__(name, max_concurrency=max_concurrency,
-                         max_attempts=max_attempts, backoff_s=backoff_s, sleep=sleep)
+                         max_attempts=max_attempts, backoff_s=backoff_s, sleep=sleep,
+                         request_options=request_options)
         self._responder = responder
 
     def _request(self, payload: dict) -> dict:
         return self._responder(payload)
+
+
+class ReplayOnlyEndpoint:
+    """Stands in for the gateway when only cached cells may be read.
+
+    Carries the identity fields the Executor binds (name, base_url, request_options)
+    so it opens the same experiment, needs no API key, and refuses to generate. The
+    Executor's replay_only flag already raises CacheMiss first; this is the second
+    lock, so a replay can never reach the network even if that flag is forgotten.
+    """
+
+    def __init__(self, name: str, *, base_url: str | None = None,
+                 request_options: Mapping[str, object] | None = None):
+        self.name = name
+        self.base_url = _validate_url(base_url) if base_url else None
+        self.request_options = validate_request_options(request_options)
+
+    def complete(self, prompt: str, *, seed: int, max_tokens: int,
+                 temperature: float) -> CallResult:
+        raise RuntimeError("replay-only endpoint: this cell is not in the tensor")
+
+
+def endpoint_from_config(model: Mapping, *, concurrency: int | None = None,
+                         replay_only: bool = False):
+    """The one place a config's `model:` block becomes an endpoint."""
+    options = model.get("request_options") or {}
+    if replay_only:
+        return ReplayOnlyEndpoint(model["name"], base_url=model["endpoint"],
+                                  request_options=options)
+    retry = model["retry"]
+    return OpenAICompatEndpoint(
+        name=model["name"], base_url=model["endpoint"],
+        api_key_env=model.get("api_key_env", "LLM_GATEWAY_API_KEY"),
+        max_concurrency=concurrency or model["max_concurrency"],
+        max_attempts=retry["max_attempts"], backoff_s=retry["backoff_s"],
+        timeout_s=model.get("timeout_s", 900), request_options=options)

@@ -1,8 +1,10 @@
 """MATH loader and scorer.
 
 Answers come out of ``\\boxed{...}`` (100% of Level 4-5 training solutions have one).
-Scoring is exact match after normalisation, with a sympy fallback for forms that are
-written differently but equal (``\\frac{1}{2}`` vs ``0.5``, ``2/4``, reordered sums).
+Scoring is exact match after normalisation, with a bounded numeric fallback for forms
+that are written differently but equal (``\\frac{1}{2}`` vs ``0.5``, ``2/4``, reordered
+sums of closed-form numbers); see the note above ``_LATEX_TO_PY`` for why it is no
+longer sympy.
 
 A model answer that cannot be parsed scores 0 and is flagged ``parse_fail`` in the
 RunRecord, so truncated generations are counted as a defect rather than silently

@@ -13,8 +13,14 @@ contains the whole MATH-500 Level 4-5 subset (262 problems) so results stay
 comparable with the community number; the rest is topped up at random to widen the
 confidence intervals on C and E, which the 262-problem subset alone cannot carry.
 
+DeepMath-103K (the pending main cell) has a single source split, so all four roles are
+drawn from one difficulty band, disjoint, with the P2 probe problems optionally held
+out so that the problems used to choose the cell never become test problems.
+
 Usage:
-    python3 data/make_splits.py --config configs/e0.yaml
+    python3 data/make_splits.py                       # MATH Level 4-5 (math_v1.json)
+    python3 data/make_splits.py --family deepmath --band 8.5 \
+        --exclude-p2 runs/p2_deepmath_8.5/p2_report.json
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from data.loaders.deepmath import DEFAULT_RAW as DEEPMATH_RAW, load_band  # noqa: E402
 from data.loaders.math import load_pool, task_id_for  # noqa: E402
 
 RAW = pathlib.Path("data/raw")
@@ -121,27 +128,79 @@ def build(
     return payload
 
 
+def build_deepmath(seed: int, n_train: int, n_audit: int, n_val: int, n_test: int,
+                   band: float, raw: str = DEEPMATH_RAW,
+                   exclude: frozenset[str] = frozenset()) -> dict:
+    """Four disjoint roles from one DeepMath band."""
+    full = load_band(raw, band)
+    pool = full[~full["task_id"].isin(exclude)].reset_index(drop=True)
+    need = n_train + n_audit + n_val + n_test
+    if len(pool) < need:
+        raise SystemExit(f"band {band} has {len(pool)} usable problems < {need}; download "
+                         "more shards (data/fetch_deepmath.py N) or shrink the roles")
+    order = np.random.default_rng(seed).permutation(len(pool))
+    picked = pool.iloc[order[:need]]
+    bounds = np.cumsum([0, n_train, n_audit, n_val, n_test])
+    roles = {role: picked.iloc[bounds[i]:bounds[i + 1]]
+             for i, role in enumerate(("train", "audit", "val", "test"))}
+    ids = {role: list(df["task_id"]) for role, df in roles.items()}
+    payload = {
+        "family": "deepmath",
+        "answer_filter": "nonempty_nonbinary_v1",
+        "seed": seed,
+        "band": [band, band + 0.5],
+        "source": {"all_roles": "zwhe99/DeepMath-103K (single source split)"},
+        "sizes": {role: len(v) for role, v in ids.items()},
+        "pool_sizes": {"band_pool": len(full), "excluded_p2": len(full) - len(pool),
+                       "usable": len(pool)},
+        "splits": {role: sorted(v) for role, v in ids.items()},
+        "answers": {tid: str(ans) for df in roles.values()
+                    for tid, ans in zip(df["task_id"], df["answer_str"])},
+        "difficulty_by_task": {tid: float(d) for df in roles.values()
+                               for tid, d in zip(df["task_id"], df["difficulty"])},
+    }
+    blob = json.dumps({k: payload[k] for k in
+                      ("family", "answer_filter", "seed", "band", "sizes", "splits")},
+                      sort_keys=True)
+    payload["fingerprint"] = hashlib.sha256(blob.encode()).hexdigest()[:16]
+    return payload
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--family", default="math")
+    ap.add_argument("--family", choices=("math", "deepmath"), default="math")
     ap.add_argument("--seed", type=int, default=20261013)
     ap.add_argument("--train", type=int, default=256)
     ap.add_argument("--audit", type=int, default=300)
     ap.add_argument("--val", type=int, default=300)
     ap.add_argument("--test", type=int, default=1000)
-    ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
+    ap.add_argument("--band", type=float, default=None, help="DeepMath band lower edge")
+    ap.add_argument("--exclude-p2", type=pathlib.Path, default=None,
+                    help="p2_report.json whose probe problems must stay out of every role")
+    ap.add_argument("--out", type=pathlib.Path, default=None)
     args = ap.parse_args()
 
-    payload = build(args.seed, args.train, args.audit, args.val, args.test)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(payload, indent=1, sort_keys=True))
+    if args.family == "deepmath":
+        if args.band is None:
+            raise SystemExit("--band is required for --family deepmath")
+        exclude = frozenset(json.loads(args.exclude_p2.read_text())["task_ids"]
+                            if args.exclude_p2 else ())
+        payload = build_deepmath(args.seed, args.train, args.audit, args.val, args.test,
+                                 args.band, exclude=exclude)
+        out = args.out or pathlib.Path(f"data/splits/deepmath_b{args.band}_v1.json")
+    else:
+        payload = build(args.seed, args.train, args.audit, args.val, args.test)
+        out = args.out or DEFAULT_OUT
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=1, sort_keys=True))
 
-    print(f"wrote {args.out}  fingerprint={payload['fingerprint']}")
+    print(f"wrote {out}  fingerprint={payload['fingerprint']}")
     print(f"  sizes      {payload['sizes']}")
     print(f"  pools      {payload['pool_sizes']}")
-    print(f"  test anchor {payload['test_anchor']['n']} MATH-500 L4-5 problems included")
-    lv = pd.Series(payload["levels_by_task"]).value_counts().sort_index()
-    print(f"  levels     {lv.to_dict()}")
+    if args.family == "math":
+        print(f"  test anchor {payload['test_anchor']['n']} MATH-500 L4-5 problems included")
+        lv = pd.Series(payload["levels_by_task"]).value_counts().sort_index()
+        print(f"  levels     {lv.to_dict()}")
 
 
 if __name__ == "__main__":

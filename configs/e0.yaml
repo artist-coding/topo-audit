@@ -12,7 +12,11 @@ model:
   # 1024 会让 L5 难题的思考链吃光预算、content 返回空：实测 DeepSeek 1/3、
   # gpt-oss 3/3、Laguna 3/3 在 1024 下截断且无答案。8192 下仍有约 1/3 的最难题截断。
   max_tokens_per_node: 8192
-  thinking: unavailable_to_disable   # thinking.type=disabled 被接受但无效，仍有 reasoning_tokens
+  # 思考模式：gateway 默认开，E0 主条件就用默认（P1 与真端点冒烟都是这个条件）。
+  # thinking.type=disabled 无效，但 P1c 实测 reasoning_effort 可调（none / low / high /
+  # xhigh / max）。要做思考轴就在这里填 {reasoning_effort: none} 之类并换一个 exp：
+  # 它会进 bind_experiment，和默认条件的缓存混不到一起。
+  request_options: {}
   timeout_s: 900                 # band-9 generations ran to 120s; leave real headroom
   retry:
     max_attempts: 3              # gateway 偶发 502
@@ -22,6 +26,11 @@ task:
   family: math
   subset: level_4_5              # Level 1-3 在 2026 模型上已饱和
   splits: data/splits/math_v1.json
+  # 主格未定（见 CLAUDE.md）：这里仍是 MATH L4-5。若 P2 选 DeepMath 8.5 档：
+  #   python3 data/make_splits.py --family deepmath --band 8.5 \
+  #       --exclude-p2 runs/p2_deepmath_8.5/p2_report.json
+  # 然后 splits 改成 data/splits/deepmath_b8.5_v1.json、加 raw: data/raw/deepmath.parquet，
+  # 并换一个 exp（题库不同，缓存不能共用）。
 
 space:
   id: s0                         # 4 nodes, 6 optional forward edges
@@ -38,7 +47,7 @@ splits:
 
 tensor:
   repeats:
-    train: 8                     # R=8：50 种子下避免样本被复用 7 次
+    train: 8                     # R=8：20 种子下单个 (图,题) 约命中 11 次、复用 1.4 次
     audit: 2
     val: 2
     test: 1
@@ -59,15 +68,20 @@ budget:
   # 否则"种子免费重放"只是口头承诺，repeat 分配一有 bug 就悄悄烧算力。
   replay_only: true
   checkpoints: every_step        # 重放免费，不必只在 [25,50,100,150,200]
-  report_at: [25, 200]           # 正文引用的两个点：约等于空间大小、以及给足预算
+  # 正文引用的两个点：约等于空间大小、以及给足预算。报告先按 analysis/trajectory.py
+  # 把各优化器对齐到整数预算：预算 t 取最后一个 cum_evals <= t 的轮次之后的 incumbent
+  # （reinforce_edge 每轮 8 次，t=25 取第 3 轮即 24 次之后的图）。
+  report_at: [25, 200]
 
 # 20 不是 50：搜索种子共享同一张张量（见 Executor.sample_seed），
-# 50 个种子下每个样本被复用 3.4 次，多出的精度部分是假的；
-# 20 个种子复用 1.4 次近乎独立，而 95% 单侧上界 0.95 分仍远低于 ε=2.0。
+# 50 个种子下每个样本被复用 3.4 次，多出的精度部分是假的；20 个种子复用 1.4 次。
+# 种子不降低平台期检验的任务噪声（收敛后各种子持有同一对图），见 analysis/plateau.py。
 seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
 
 plateau:
-  epsilon: 2.0                   # 预登记；功效计算见 docs/pre-registration.md
+  # 占位，尚未预登记。300 道 val、两图不一致率 q=0.2 时噪声下界约 4.3 分，排除 2.0 需约
+  # 1,350 道 val。用 P2 实测的 top-5 配对差方差定 ε 与 val 规模，再写进预登记。
+  epsilon: 2.0
   delta_t: 50
   distinguish_frozen: true       # "incumbent 冻住" 与 "变了没涨" 分开报
 
@@ -89,4 +103,8 @@ reinforce_edge:                  # GPTSwarm 式边级策略梯度 + 组内相对
 acceptance:
   identity_tolerance: 1.0e-9
   max_truncation_rate: 0.15      # 超过就说明 max_tokens_per_node 还不够
+  # 任一节点截断整次运行记 0，所以图越深越吃亏：单节点 3% 时 4 节点链约 11.5%。
+  # 影响图间比较的是各行截断率的差：两行差 s 时，它们的分差被压掉约 p·s（p≈0.7 时
+  # 3 个百分点的差就是约 2 分，和 ε 同量级）。超过这个门槛先加 token 上限再建张量。
+  max_row_truncation_spread: 0.03
   token_reconciliation_error: 0.01

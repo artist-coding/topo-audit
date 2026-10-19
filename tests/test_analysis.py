@@ -235,8 +235,9 @@ def test_required_tasks_ignores_seed_count():
     import inspect
 
     assert "n_seeds" not in inspect.signature(required_tasks).parameters
-    # Excluding 2 points at q=0.2 needs ~1,100 tasks, not ~22 as 50 seeds implied.
-    assert 1_000 <= required_tasks(0.02, 0.2) <= 1_200
+    # Excluding 2 points at q=0.2 needs ~1,350 tasks, not ~22 as 50 seeds implied
+    # (nor ~1,100, which the q(1-q) variance implied).
+    assert 1_300 <= required_tasks(0.02, 0.2) <= 1_400
 
 
 def test_interval_disjointness_is_the_e0_criterion():
@@ -321,19 +322,50 @@ def test_seeds_do_not_move_the_floor():
     many = power_report(0.02, 0.2, n_tasks=300, n_seeds=50)
     assert few.floor_upper_bound == pytest.approx(many.floor_upper_bound)
     assert many.optimistic_upper_bound < many.floor_upper_bound
-    assert not many.sufficient      # 3.8 points of floor against a 2-point epsilon
+    assert not many.sufficient      # 4.25 points of floor against a 2-point epsilon
 
 
-def test_two_points_needs_about_eleven_hundred_tasks():
+def test_two_points_needs_about_thirteen_hundred_fifty_tasks():
     assert not power_report(0.02, 0.2, n_tasks=300, n_seeds=20).sufficient
-    assert power_report(0.02, 0.2, n_tasks=1200, n_seeds=20).sufficient
+    assert not power_report(0.02, 0.2, n_tasks=1200, n_seeds=20).sufficient
+    assert power_report(0.02, 0.2, n_tasks=1400, n_seeds=20).sufficient
 
 
 def test_floor_matches_the_closed_form():
     report = power_report(0.02, 0.2, n_tasks=300, n_seeds=20)
-    expected = 1.6449 * np.sqrt(0.2 * 0.8 / 300)
+    expected = 1.6449 * np.sqrt(0.2 / 300)
     assert report.floor_upper_bound == pytest.approx(expected, rel=1e-3)
-    assert report.floor_upper_bound == pytest.approx(0.038, abs=0.002)
+    assert report.floor_upper_bound == pytest.approx(0.0425, abs=0.001)
+    assert report.smallest_excludable_epsilon == report.floor_upper_bound
+
+
+def test_null_variance_of_a_paired_binary_difference_is_q_not_q_one_minus_q():
+    """Simulate the null: two equally good graphs that disagree on q of the tasks."""
+    rng = np.random.default_rng(11)
+    q, n = 0.2, 300
+    means = []
+    for _ in range(3000):
+        u = rng.random(n)
+        d = np.where(u < q / 2, 1.0, np.where(u < q, -1.0, 0.0))
+        means.append(d.mean())
+    simulated_se = float(np.std(means))
+    assert simulated_se == pytest.approx(np.sqrt(q / n), rel=0.05)
+    assert simulated_se > np.sqrt(q * (1 - q) / n) * 1.05
+
+
+def test_a_measured_variance_overrides_the_disagreement_model():
+    report = power_report(0.02, n_tasks=300, n_seeds=20, variance=0.1)
+    assert report.floor_upper_bound == pytest.approx(1.6449 * np.sqrt(0.1 / 300), rel=1e-3)
+    assert report.tasks_needed == required_tasks(0.02, variance=0.1)
+
+
+def test_paired_variance_works_on_repeat_averaged_scores():
+    from analysis.bootstrap import paired_variance
+
+    left = np.array([1.0, 0.5, 0.0, 1.0, 0.5, np.nan])
+    right = np.array([0.5, 0.5, 0.5, 1.0, 0.0, 1.0])
+    diff = (left - right)[:5]
+    assert paired_variance(left, right) == pytest.approx(np.var(diff, ddof=1))
 
 
 def test_widening_the_split_is_the_only_lever_on_the_floor():

@@ -1,9 +1,11 @@
-# step 1-2
+# runtime
 pandas>=2.2
-pyarrow>=15
-sympy>=1.12
-antlr4-python3-runtime==4.11   # sympy.parsing.latex; without it 0.5 != \frac{1}{2}
+pyarrow>=15                    # reads the raw parquet pools
+pyyaml>=6.0                    # configs (run_audit, report, sweep, single_agent)
+
+# tests
 pytest>=8
 
-# step 3 (endpoint client)
-openai>=1.40
+# No longer needed: the endpoint client is standard-library urllib (no openai SDK),
+# and the scorer's symbolic fallback was replaced by a bounded numeric evaluator, so
+# sympy and its antlr4 LaTeX parser are not imported anywhere.
