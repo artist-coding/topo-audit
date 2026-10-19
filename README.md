@@ -133,21 +133,36 @@ python3 analysis/report.py --config configs/e0.yaml        # report.json + decom
 2026-10-19 已下载完整 10 个分片（103,022 题，源版本
 `5cf055d1fe3d7a2eb19719ac020211469736ae44`）。v2 过滤及去重后，`[8.5,9.0)`
 只有 1,423 题，无法容纳原定四角色划分；`[8.0,9.0)` 有 8,157 题。
-本轮 P2 因此固定宽题池，使用 `configs/p2_dm80_90_v2.yaml`，150 道留出题、每格两次采样。
+本轮 P2 因此固定宽题池，计划 150 道留出题、每格两次采样。
 验证集候选为 1,350 题 × 2，测试集保留 1,000 题；ε=2 分是待验证的精度目标。
 正式 E0 划分和配置尚未生成，须先验收 P2。题池快照、SHA256、抽样 ID 和参数记录在
 `runs/p2_dm80_90_v2/protocol.json`；原始三个分片数据另有备份。
 
 ```bash
-# 同一数据快照、同一个种子，5 题和 hand6 都包含在全量 P2 中
+# 原默认条件的冒烟；已发现截断，不应直接启动其全量 P2
 python3 scripts/p2_spread.py --config configs/p2_dm80_90_v2.yaml --pool deepmath --band 8.0 --band-width 1.0 --exp p2_dm80_90_v2 --n 5 --graphs hand6 --no-single --concurrency 4
-python3 scripts/p2_spread.py --config configs/p2_dm80_90_v2.yaml --pool deepmath --band 8.0 --band-width 1.0 --exp p2_dm80_90_v2 --n 150 --graphs all --repeats 2 --concurrency 8
 ```
+
+本轮默认思考、8,192 token 的冒烟完成 30 格，其中 8 格截断，各图截断率
+20%–40%，行间差 20 个百分点，未通过 3 个百分点的门槛。
+单题诊断中，默认思考提高至 16,384 token 后仍截断，且遇到两次 502；
+`reasoning_effort: low`、16,384 token 同题使用 11,737 token 答对且未截断。
+两个诊断配置分别为 `configs/p2_dm80_90_v2_16k.yaml` 和
+`configs/p2_dm80_90_v2_low16k.yaml`，实验名与缓存独立。
+后者冒烟停止时完成 23/30 格，其中 1 格截断，另有 1 格连续三次 502 后失败，
+三次耗时均约 120.01 秒；客户端 `timeout_s` 已为 900。
+这提示网关或上游可能存在约 120 秒限制，需查服务端日志确认；降低思考强度未解决问题。
+不完整冒烟不作排名或功效结论。结果保存在各实验的 `protocol.json`、原默认条件的
+`smoke_report.json` 与 low/16k 的 `smoke_diagnostic.json`；全量 P2 和正式 E0 均未启动。
+下一步先排查服务端 502/超时限制，再在独立实验中验证足够的 token 上限，
+通过完整冒烟后才启动 150 题全量 P2。同一条件可以缓存续跑；参数变更必须换实验名。
+提高上限或改变思考强度后的结果不能与原条件合并。旧 P1 数字也不能替代新条件 P2。
 
 `--band-width` 同样适用于下载后的频次检查、`python3 -m data.loaders.deepmath` 和
 `data/make_splits.py`；划分文件记录上下界，后续所有驱动按该范围加载。
 
-七步都有驱动和 mock 单测；真端点只跑过冒烟（250 格、0 失败、0% 截断）。模型条件已确认：
+七步都有驱动和 mock 单测；此前真端点冒烟为 250 格、0 失败、0% 截断
+（本轮 DeepMath 新题池的失败情况见上，不代表该历史结果）。历史模型条件：
 DeepSeek-V4.1-Flash、温度 0.7、每节点 8192 token、思考用 gateway 默认。
 
 **悬着的一个决定：主格用哪个难度档。** MATH Level 4–5 对 2026 的思考模型已饱和
