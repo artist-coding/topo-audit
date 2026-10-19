@@ -17,13 +17,18 @@ import urllib.request
 
 import pandas as pd
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from data.loaders.deepmath import answer_profile
+
 URL = ("https://huggingface.co/datasets/zwhe99/DeepMath-103K/resolve/main/"
        "data/train-{i:05d}-of-00010.parquet")
 KEEP = ["question", "final_answer", "difficulty", "topic"]
 OUT = pathlib.Path("data/raw/deepmath.parquet")
 
 
-def main(n_shards: int = 3) -> None:
+def main(n_shards: int = 3, band: float | None = None) -> None:
     frames = []
     for i in range(n_shards):
         url = URL.format(i=i)
@@ -50,7 +55,20 @@ def main(n_shards: int = 3) -> None:
     print("\ncumulative at or above:")
     for t in sorted(allm["difficulty"].unique()):
         print(f"  >= {t:>4}: {int((allm['difficulty'] >= t).sum()):>6,}")
+    if band is not None:
+        import json
+
+        print(json.dumps(answer_profile(OUT, band), indent=2, ensure_ascii=False))
+    else:
+        print("Before making splits, inspect the chosen band with: "
+              "python3 -m data.loaders.deepmath --band <lower-bound>")
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]) if len(sys.argv) > 1 else 3)
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("n_shards", type=int, nargs="?", default=3)
+    parser.add_argument("--band", type=float, help="inspect this band's answer frequencies after download")
+    args = parser.parse_args()
+    main(args.n_shards, args.band)

@@ -24,8 +24,11 @@
 
 ## 硬规则（不要违反）
 
-- DeepMath 的 P1 / P2 / 正式划分共用 `load_band()`：剔除空答案及忽略大小写、首尾空白后的
-  Yes/No/True/False。旧 P1b 数字包含判断题，不能直接替代此题池的测量；先核实过滤后题量，
+- DeepMath 的 P1 / P2 / 正式划分共用 `load_band()`：剥掉 boxed 包装、经 `normalize_answer`
+  归一化后剔除空答案、Yes/No/True/False、converges/diverges/convergent/divergent 标签。
+  版本为 `normalized_nonbinary_v2`，不会自动识别所有二选一题；先用
+  `python3 -m data.loaders.deepmath --band 8.5` 检查过滤前后高频答案（数值 0/1 保留）。
+  旧 P1b 数字包含判断题，不能直接替代此题池的测量；先核实过滤后题量，
   下载更多 shards，再留出 P2 并生成四角色划分。划分记录 `answer_filter`。
 - P2 必须逐一验证 `(exec_hash, task_id, repeat)` 完整且唯一、分数有限；缺格时报错，
   靠缓存续跑补齐后才能排名或给出 PASS。单智能体费用按真实调用去重计入 P2 总费用，

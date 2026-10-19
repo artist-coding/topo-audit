@@ -36,7 +36,9 @@ import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from data.loaders.deepmath import DEFAULT_RAW as DEEPMATH_RAW, load_band  # noqa: E402
+from data.loaders.deepmath import (  # noqa: E402
+    ANSWER_FILTER, DEFAULT_RAW as DEEPMATH_RAW, answer_profile, load_band,
+)
 from data.loaders.math import load_pool, task_id_for  # noqa: E402
 
 RAW = pathlib.Path("data/raw")
@@ -146,7 +148,7 @@ def build_deepmath(seed: int, n_train: int, n_audit: int, n_val: int, n_test: in
     ids = {role: list(df["task_id"]) for role, df in roles.items()}
     payload = {
         "family": "deepmath",
-        "answer_filter": "nonempty_nonbinary_v1",
+        "answer_filter": ANSWER_FILTER,
         "seed": seed,
         "band": [band, band + 0.5],
         "source": {"all_roles": "zwhe99/DeepMath-103K (single source split)"},
@@ -183,6 +185,8 @@ def main() -> None:
     if args.family == "deepmath":
         if args.band is None:
             raise SystemExit("--band is required for --family deepmath")
+        print(json.dumps(answer_profile(DEEPMATH_RAW, args.band), indent=2,
+                         ensure_ascii=False), flush=True)
         exclude = frozenset(json.loads(args.exclude_p2.read_text())["task_ids"]
                             if args.exclude_p2 else ())
         payload = build_deepmath(args.seed, args.train, args.audit, args.val, args.test,

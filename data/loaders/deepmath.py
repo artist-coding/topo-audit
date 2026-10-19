@@ -14,10 +14,47 @@ from typing import Iterator
 
 import pandas as pd
 
-from data.loaders.math import PROMPT_TEMPLATE, Task, task_id_for
+from data.loaders.math import PROMPT_TEMPLATE, Task, extract_boxed, normalize_answer, task_id_for
 
 DEFAULT_RAW = "data/raw/deepmath.parquet"
 BAND_WIDTH = 0.5
+ANSWER_FILTER = "normalized_nonbinary_v2"
+CATEGORICAL_ANSWERS = frozenset({
+    "yes", "no", "true", "false", "converges", "diverges", "convergent", "divergent",
+})
+
+
+def answer_key(answer: object) -> str:
+    """Normalize labels for filtering/profiling without changing the scoring gold."""
+    if pd.isna(answer):
+        return ""
+    text = str(answer)
+    boxed = extract_boxed(text)
+    normalized = normalize_answer(text if boxed is None else boxed)
+    return (normalized or "").casefold().strip().rstrip(".!?,;:")
+
+
+def _band_frame(path: str, low: float, width: float) -> pd.DataFrame:
+    frame = pd.read_parquet(path)
+    frame = frame[in_band(frame["difficulty"], low, width)].copy()
+    frame["task_id"] = frame["question"].map(task_id_for)
+    return frame.drop_duplicates(subset="task_id", keep="first")
+
+
+def answer_profile(path: str, low: float, width: float = BAND_WIDTH, top: int = 20) -> dict:
+    """Inspect frequent normalized answers before choosing a pool or making splits.
+
+    The explicit label list cannot detect every two-choice question. Frequencies
+    expose other labels for review; frequent numeric answers are never auto-excluded.
+    """
+    frame = _band_frame(path, low, width)
+    keys = frame["final_answer"].map(answer_key)
+    keep = keys.ne("") & ~keys.isin(CATEGORICAL_ANSWERS)
+    return {"band": [low, low + width], "answer_filter": ANSWER_FILTER,
+            "total": len(frame), "kept": int(keep.sum()),
+            "excluded": int((~keep).sum()),
+            "top_answers_before": keys.value_counts().head(top).to_dict(),
+            "top_answers_after": keys[keep].value_counts().head(top).to_dict()}
 
 
 def in_band(difficulty: pd.Series, low: float, width: float = BAND_WIDTH) -> pd.Series:
@@ -28,15 +65,11 @@ def in_band(difficulty: pd.Series, low: float, width: float = BAND_WIDTH) -> pd.
 
 def load_band(path: str, low: float, width: float = BAND_WIDTH) -> pd.DataFrame:
     """Problems of one band with ``task_id``, ``prompt``, ``answer_str``, deduplicated."""
-    frame = pd.read_parquet(path)
-    frame = frame[in_band(frame["difficulty"], low, width)].copy()
-    answers = frame["final_answer"].astype(str).str.strip().str.lower()
+    frame = _band_frame(path, low, width)
+    answers = frame["final_answer"].map(answer_key)
     # Use the same non-binary pool for P1, P2 and the four experiment splits.
     # Binary-answer prevalence varies with difficulty and confounds the band gate.
-    frame = frame[frame["final_answer"].notna()
-                  & ~answers.isin({"", "yes", "no", "true", "false"})].copy()
-    frame["task_id"] = frame["question"].map(task_id_for)
-    frame = frame.drop_duplicates(subset="task_id", keep="first")
+    frame = frame[answers.ne("") & ~answers.isin(CATEGORICAL_ANSWERS)].copy()
     frame["answer_str"] = frame["final_answer"].astype(str)
     frame["prompt"] = frame["question"].map(
         lambda q: PROMPT_TEMPLATE.format(problem=q.strip()))
@@ -49,3 +82,14 @@ def tasks_from_band_frame(frame: pd.DataFrame, split_role: str) -> Iterator[Task
                    prompt=row.prompt, answer=str(row.answer_str),
                    meta={"difficulty": float(row.difficulty),
                          "topic": getattr(row, "topic", None)})
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Inspect DeepMath answer frequencies without generating splits")
+    parser.add_argument("--raw", default=DEFAULT_RAW)
+    parser.add_argument("--band", type=float, required=True)
+    args = parser.parse_args()
+    print(json.dumps(answer_profile(args.raw, args.band), indent=2, ensure_ascii=False))

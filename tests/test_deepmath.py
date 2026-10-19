@@ -1,7 +1,4 @@
-"""DeepMath pool: half-open bands, a disjoint split from one band, and task loading.
-
-pyarrow is not needed: read_parquet is replaced by a synthetic frame.
-"""
+"""DeepMath filtering, profiling, disjoint splits and probe compatibility."""
 
 from __future__ import annotations
 
@@ -10,7 +7,7 @@ import json
 import pandas as pd
 import pytest
 
-from data.loaders.deepmath import in_band, load_band
+from data.loaders.deepmath import ANSWER_FILTER, answer_profile, in_band, load_band
 from data.make_splits import build_deepmath
 from data.tasks import load_split_tasks
 
@@ -45,6 +42,7 @@ def test_split_is_disjoint_deterministic_and_keeps_p2_problems_out(fake_parquet)
     assert set(ids) <= band_ids and not set(ids) & excluded
     assert first["pool_sizes"] == {"band_pool": 100, "excluded_p2": 10, "usable": 90}
     assert first["family"] == "deepmath" and first["band"] == [8.5, 9.0]
+    assert first["answer_filter"] == ANSWER_FILTER == "normalized_nonbinary_v2"
 
 
 def test_split_resolves_to_tasks_with_the_recorded_answers(fake_parquet, tmp_path):
@@ -83,3 +81,50 @@ def test_nonbinary_pool_is_shared_by_probe_and_splits(tmp_path):
     split_ids = {t for ids in split["splits"].values() for t in ids}
     assert split_ids | excluded_ids == set(pool.task_id)
     assert not split_ids & excluded_ids
+
+
+def test_normalized_labels_are_excluded_but_math_gold_is_preserved(tmp_path):
+    excluded = [r"\text{Yes}", "Yes.", r"\text{No}", r"\boxed{No}",
+                r"$\boxed{\text{No}}$", "TRUE!", r"\mbox{False}",
+                "converges", "Diverges.", r"\boxed{Convergent}", "divergent", None, ""]
+    kept = ["0", "1", r"\boxed{\frac{1}{2}}", "No solution", "converges for x > 1"]
+    frame = pd.DataFrame([{"question": f"Q{i}", "final_answer": a, "difficulty": 8.5}
+                          for i, a in enumerate(excluded + kept)])
+    path = tmp_path / "answers.parquet"
+    frame.to_parquet(path)
+    pool = load_band(path, 8.5)
+    assert pool.answer_str.tolist() == kept
+    assert pool.final_answer.tolist() == kept
+    profile = answer_profile(path, 8.5)
+    assert profile["total"] == len(frame)
+    assert profile["excluded"] == len(excluded)
+    assert profile["kept"] == len(kept)
+    assert profile["top_answers_before"]["no"] == 3
+    assert profile["top_answers_before"]["yes"] == 2
+    assert "no" not in profile["top_answers_after"]
+    assert profile["top_answers_after"]["0"] == 1
+
+
+def test_p1_thinking_pools_keep_the_expected_columns(tmp_path, monkeypatch):
+    import os
+
+    # The legacy P1 module removes proxy variables on import; isolate that side effect.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    from scripts import p1_thinking_axis as p1
+
+    monkeypatch.chdir(tmp_path)
+    raw = tmp_path / "data/raw/deepmath.parquet"
+    raw.parent.mkdir(parents=True)
+    frame = pd.DataFrame([
+        {"question": f"Q{band}-{i}", "final_answer": ans, "difficulty": band}
+        for band in (7.0, 8.5) for i, ans in enumerate([r"\boxed{No}", "2", "3"])])
+    frame.to_parquet(raw)
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"splits": {"train": []}}))
+    monkeypatch.setattr(p1, "SPLITS", split)
+    monkeypatch.setattr(p1, "load_pool", lambda *a: pd.DataFrame([
+        {"task_id": "math1", "problem": "1+1", "answer_str": "2"}]))
+    pools = p1.pools(2)
+    for label in ("DeepMath 7.0", "DeepMath 8.5"):
+        assert list(pools[label].columns) == ["task_id", "problem", "answer"]
+        assert set(pools[label].answer) == {"2", "3"}

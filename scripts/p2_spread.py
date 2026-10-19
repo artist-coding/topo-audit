@@ -48,8 +48,8 @@ from analysis.bootstrap import (  # noqa: E402
     z_value,
 )
 from data.loaders.math import Task, load_pool, tasks_from_frame  # noqa: E402
-from runtime.single_agent import SingleAgentRunner, StrategyRun, _accumulate  # noqa: E402
 from runtime.cache import key_for  # noqa: E402
+from runtime.single_agent import SingleAgentRunner, StrategyRun, _accumulate  # noqa: E402
 from space.s0 import S0_ROLES, declared_nodes  # noqa: E402
 from space.topology import Topology  # noqa: E402
 
@@ -76,6 +76,9 @@ def probe_tasks(config: dict, pool: str, n: int, seed: int,
         frame = load_pool(config["task"].get("raw", "data/raw/math_hendrycks.parquet"),
                           "train", tuple(split.get("levels", (4, 5))))
         held_out = frame[~frame["task_id"].isin(assigned)].reset_index(drop=True)
+        if len(held_out) < n:
+            raise SystemExit(f"MATH has {len(held_out)} held-out problems < requested {n}; "
+                             "reduce --n or provide a larger held-out pool")
         picked = held_out.iloc[rng.permutation(len(held_out))[:n]]
         return list(tasks_from_frame(picked, "audit"))
     if pool == "deepmath":
@@ -219,7 +222,9 @@ def summarize_probe(records, single_runs: Sequence[StrategyRun],
                                  "measure": "best - fifth (or second)",
                                  "pass": bool(second_or_fifth
                                               and second_or_fifth["diff"] >= top_gap)},
-            "capacity_positive": {"pass": capacity.get("cross_fitted", 0.0) > 0},
+            "capacity_positive": {
+                "pass": (capacity["cross_fitted"] > 0
+                         if "cross_fitted" in capacity else None)},
             "row_truncation_spread": {"pass": trunc["spread_ok"]},
         },
     }
@@ -341,6 +346,10 @@ def run_probe(config: dict, executor, runner: SingleAgentRunner | None,
     return summary
 
 
+def gate_label(passed: bool | None) -> str:
+    return "n/a" if passed is None else ("PASS" if passed else "FAIL")
+
+
 def main() -> None:
     import yaml
 
@@ -406,7 +415,7 @@ def main() -> None:
     t = summary["truncation"]
     print(f"truncation by row {t['min_row']:.1%}..{t['max_row']:.1%}")
     for name, gate in summary["gates"].items():
-        print(f"  gate {name}: {'PASS' if gate['pass'] else 'FAIL'}")
+        print(f"  gate {name}: {gate_label(gate['pass'])}")
     print(f"wrote {out}")
 
 

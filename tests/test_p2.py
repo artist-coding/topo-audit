@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import numpy as np
 import pytest
 
@@ -10,7 +11,7 @@ from data.loaders.math import Task
 from runtime.cache import RunCache
 from runtime.executor import Executor, RunRecord
 from runtime.single_agent import SingleAgentRunner, StrategyRun
-from scripts.p2_spread import probe_graphs, run_probe, summarize_probe
+from scripts.p2_spread import gate_label, probe_graphs, probe_tasks, run_probe, summarize_probe
 from tests.mock_endpoint import MockEndpoint
 from tests.test_single_agent import _templates
 
@@ -149,3 +150,40 @@ def test_failed_probe_resumes_only_missing_cells_and_reports_no_partial_gates(tm
     assert report["tokens"]["pi_single"]["fresh"] == 0
     assert report["tokens"]["fresh"] < report["tokens"]["logical"]
     assert len(report["ranking"]) == 6
+    assert report["gates"]["capacity_positive"]["pass"] is None
+
+
+def test_unevaluated_gates_are_null_and_display_na():
+    graphs = probe_graphs("m", "hand6")
+    ids = [f"t{i}" for i in range(10)]
+    records = [_record(g.exec_hash, t, float(i % 2))
+               for g in graphs.values() for i, t in enumerate(ids)]
+    report = summarize_probe(records, [], graphs, ids, max_row_truncation_spread=None)
+    for name in ("capacity_positive", "row_truncation_spread"):
+        passed = report["gates"][name]["pass"]
+        assert passed is None
+        assert gate_label(passed) == "n/a"
+    assert gate_label(True) == "PASS" and gate_label(False) == "FAIL"
+    single = [StrategyRun("cot", 1, tid, 0, 1., False, "1", 60, 40, None, 1)
+              for tid in ids]
+    report = summarize_probe(records, single, graphs, ids, budget_tokens=1)
+    assert report["gates"]["capacity_positive"]["pass"] is None
+    report = summarize_probe(records, single, graphs, ids, budget_tokens=100)
+    assert report["gates"]["capacity_positive"]["pass"] is False
+    assert report["gates"]["row_truncation_spread"]["pass"] is True
+
+
+def test_math_probe_checks_size_after_excluding_assigned_tasks(tmp_path, monkeypatch):
+    import pandas as pd
+    import scripts.p2_spread as p2
+
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({"splits": {"train": ["taken"]}}))
+    frame = pd.DataFrame([
+        {"task_id": tid, "problem": "1+1", "prompt": "1+1", "answer_str": "2",
+         "level_int": 4, "type": "algebra"} for tid in ("taken", "free1", "free2")])
+    monkeypatch.setattr(p2, "load_pool", lambda *a: frame)
+    config = {"task": {"splits": str(split)}}
+    with pytest.raises(SystemExit, match="2 held-out problems < requested 3"):
+        probe_tasks(config, "math", 3, 0)
+    assert {t.task_id for t in probe_tasks(config, "math", 2, 0)} == {"free1", "free2"}

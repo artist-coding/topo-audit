@@ -1,6 +1,10 @@
 # topo-audit
 
-DeepMath 的 P1、P2 和正式划分现统一剔除空答案及 Yes/No/True/False 判断题。
+DeepMath 的 P1、P2 和正式划分统一先剥掉 boxed 包装并归一化，再剔除空答案、
+Yes/No/True/False 和 converges/diverges（含 convergent/divergent）等已声明的判断标签。
+这不能识别所有二选一题。下载可用 `python3 data/fetch_deepmath.py 10 --band 8.5`，
+或对现有数据运行 `python3 -m data.loaders.deepmath --band 8.5`，检查过滤前后高频答案再划分。
+数值答案如 0、1 不会因为出现频繁而被剔除；筛选版本为 `normalized_nonbinary_v2`。
 下文旧 P1b 的准确率和工期来自过滤前题池，选主格前须重新测量并检查剩余题量。
 P2 遇到缺失评估会停止并要求缓存续跑；其总费用包含图评估和去重后的单智能体调用。
 
