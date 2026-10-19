@@ -30,8 +30,11 @@ def load_band(path: str, low: float, width: float = BAND_WIDTH) -> pd.DataFrame:
     """Problems of one band with ``task_id``, ``prompt``, ``answer_str``, deduplicated."""
     frame = pd.read_parquet(path)
     frame = frame[in_band(frame["difficulty"], low, width)].copy()
+    answers = frame["final_answer"].astype(str).str.strip().str.lower()
+    # Use the same non-binary pool for P1, P2 and the four experiment splits.
+    # Binary-answer prevalence varies with difficulty and confounds the band gate.
     frame = frame[frame["final_answer"].notna()
-                  & (frame["final_answer"].astype(str).str.strip() != "")]
+                  & ~answers.isin({"", "yes", "no", "true", "false"})].copy()
     frame["task_id"] = frame["question"].map(task_id_for)
     frame = frame.drop_duplicates(subset="task_id", keep="first")
     frame["answer_str"] = frame["final_answer"].astype(str)

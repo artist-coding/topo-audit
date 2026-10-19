@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import numpy as np
 import pytest
 
@@ -66,7 +67,7 @@ def test_capacity_is_cross_fitted_against_pi_single_at_the_budget():
 def test_run_probe_end_to_end_with_the_mock(tmp_path):
     tasks = [Task(f"p{i}", "math", "audit", f"Compute {i} + {i}.", str(2 * i), {"level": 4})
              for i in range(1, 13)]
-    endpoint = MockEndpoint(tasks, max_concurrency=4)
+    endpoint = MockEndpoint(tasks, max_concurrency=4, transient_error_rate=0.25)
     cache = RunCache(tmp_path / "cache.sqlite", exp="p2_test")
     executor = Executor(endpoint, cache, max_tokens_per_node=128, temperature=0.7,
                         train_repeats=2, runs_dir=tmp_path / "runs")
@@ -82,3 +83,69 @@ def test_run_probe_end_to_end_with_the_mock(tmp_path):
     assert "cross_fitted" in summary["capacity"]
     assert summary["single_agent_frontier"]
     assert summary["tokens"]["fresh"] > 0
+    paid = sum(c["usage"]["prompt_tokens"] + c["usage"]["completion_tokens"]
+               for c in endpoint.calls)
+    assert summary["tokens"]["logical"] == summary["tokens"]["fresh"] == paid
+    assert summary["tokens"]["pi_single"]["calls"] == len(tasks) * (4 + 4 + 6)
+    assert summary["tokens"]["pi_single"]["fresh"] > 0
+    count = endpoint.call_count
+    again = run_probe(config, executor, runner, tasks, probe_graphs("mock", "hand6"),
+                      repeats=1, concurrency=4)
+    assert endpoint.call_count == count
+    assert again["tokens"]["fresh"] == 0
+    assert again["tokens"]["logical"] == paid
+
+
+@pytest.mark.parametrize("damage", ["missing_task", "missing_repeat", "duplicate", "nan"])
+def test_incomplete_tensor_cannot_produce_a_ranking(damage):
+    graphs = probe_graphs("m", "hand6")
+    ids = [f"t{i}" for i in range(10)]
+    records = [replace(_record(g.exec_hash, tid, float(i < 5)), repeat=r)
+               for g in graphs.values() for i, tid in enumerate(ids) for r in range(2)]
+    if damage == "missing_task":
+        first = next(iter(graphs.values())).exec_hash
+        records = [r for r in records if r.exec_hash != first or r.score == 1]
+    elif damage == "missing_repeat":
+        records.pop()
+    elif damage == "duplicate":
+        records.append(records[0])
+    else:
+        records[0] = replace(records[0], score=float("nan"))
+    with pytest.raises(ValueError, match="Incomplete P2 tensor"):
+        summarize_probe(records, [], graphs, ids, repeats=2)
+
+
+def test_failed_probe_resumes_only_missing_cells_and_reports_no_partial_gates(tmp_path):
+    from runtime.endpoints import EndpointHTTPError, current_call_context
+
+    tasks = [Task(f"p{i}", "math", "audit", f"Compute {i} + {i}.", str(2*i), {})
+             for i in range(6)]
+    graphs = probe_graphs("mock", "hand6")
+    first_hash = next(iter(graphs.values())).exec_hash
+    endpoint = MockEndpoint(tasks, max_attempts=1)
+    responder = endpoint._responder
+
+    def fail_one(payload):
+        ctx = current_call_context()
+        if ctx.exec_hash == first_hash and ctx.task_id == "p5" and ctx.repeat == 1:
+            raise EndpointHTTPError(502)
+        return responder(payload)
+
+    endpoint._responder = fail_one
+    cache = RunCache(tmp_path / "cache.sqlite", exp="p2_resume")
+    executor = Executor(endpoint, cache, max_tokens_per_node=128, temperature=0.7,
+                        train_repeats=2, runs_dir=tmp_path / "runs")
+    runner = SingleAgentRunner(endpoint, cache, _templates(), exp="p2_resume",
+                               max_tokens=128, temperature=0.7, samples=2,
+                               output_dir=tmp_path / "runs")
+    config = {"acceptance": ACCEPTANCE, "single_agent": {"budget_sweep": [1, 2]}}
+    with pytest.raises(ValueError, match="1 missing"):
+        run_probe(config, executor, runner, tasks, graphs, repeats=2, concurrency=2)
+    assert not any(r.split_role == "pi_single" for r in cache.export(executor.exp))
+    endpoint._responder = responder
+    before = endpoint.call_count
+    report = run_probe(config, executor, None, tasks, graphs, repeats=2, concurrency=2)
+    assert endpoint.call_count == before + 1
+    assert report["tokens"]["pi_single"]["fresh"] == 0
+    assert report["tokens"]["fresh"] < report["tokens"]["logical"]
+    assert len(report["ranking"]) == 6

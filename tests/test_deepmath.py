@@ -62,3 +62,24 @@ def test_split_resolves_to_tasks_with_the_recorded_answers(fake_parquet, tmp_pat
 def test_a_band_too_small_for_the_roles_fails_loudly(fake_parquet):
     with pytest.raises(SystemExit, match="usable problems"):
         build_deepmath(1, 50, 50, 50, 50, 8.5, raw="x")
+
+
+def test_nonbinary_pool_is_shared_by_probe_and_splits(tmp_path):
+    from scripts.p2_spread import probe_tasks
+
+    frame = _frame(80)
+    excluded = [" Yes ", "NO", "true", " False\n", "", None]
+    frame = pd.concat([frame, pd.DataFrame([
+        {"question": f"binary {i}", "final_answer": answer, "difficulty": 8.5}
+        for i, answer in enumerate(excluded)])], ignore_index=True)
+    path = tmp_path / "deepmath.parquet"
+    frame.to_parquet(path)
+    pool = load_band(path, 8.5)
+    assert len(pool) == 20
+    assert not pool.question.str.startswith("binary").any()
+    probe = probe_tasks({"task": {"deepmath_raw": str(path)}}, "deepmath", 4, 7, 8.5)
+    excluded_ids = frozenset(t.task_id for t in probe)
+    split = build_deepmath(7, 4, 4, 4, 4, 8.5, raw=str(path), exclude=excluded_ids)
+    split_ids = {t for ids in split["splits"].values() for t in ids}
+    assert split_ids | excluded_ids == set(pool.task_id)
+    assert not split_ids & excluded_ids

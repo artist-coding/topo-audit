@@ -33,6 +33,7 @@ import itertools
 import json
 import pathlib
 import sys
+from collections import Counter
 from typing import Sequence
 
 if __package__ in (None, ""):  # run as a script: make the repo root importable
@@ -48,6 +49,7 @@ from analysis.bootstrap import (  # noqa: E402
 )
 from data.loaders.math import Task, load_pool, tasks_from_frame  # noqa: E402
 from runtime.single_agent import SingleAgentRunner, StrategyRun, _accumulate  # noqa: E402
+from runtime.cache import key_for  # noqa: E402
 from space.s0 import S0_ROLES, declared_nodes  # noqa: E402
 from space.topology import Topology  # noqa: E402
 
@@ -82,6 +84,9 @@ def probe_tasks(config: dict, pool: str, n: int, seed: int,
         if band is None:
             raise SystemExit("--band is required for the deepmath pool")
         frame = load_band(config["task"].get("deepmath_raw", DEFAULT_RAW), band)
+        if len(frame) < n:
+            raise SystemExit(f"DeepMath band {band} has {len(frame)} non-binary problems "
+                             f"< requested {n}; download more shards or reduce --n")
         picked = frame.iloc[rng.permutation(len(frame))[:n]]
         return list(tasks_from_band_frame(picked, "audit"))
     raise SystemExit(f"unknown pool {pool!r}")
@@ -109,6 +114,24 @@ def probe_graphs(model: str, which: str) -> dict[str, Topology]:
 
 # ----------------------------------------------------------------- analysis
 
+def require_complete_probe(records, graphs, task_ids, repeats: int) -> None:
+    """No ranking or gate may use a tensor with missing/duplicate/nonfinite cells."""
+    if repeats < 1 or len(task_ids) < 2 or len(set(task_ids)) != len(task_ids):
+        raise ValueError("P2 needs positive repeats and at least two distinct tasks")
+    expected = {(g.exec_hash, tid, repeat) for g in graphs.values()
+                for tid in task_ids for repeat in range(repeats)}
+    counts = Counter((r.exec_hash, r.task_id, r.repeat) for r in records)
+    missing = sorted(expected - counts.keys())
+    invalid = {key for key, count in counts.items() if count != 1 or key not in expected}
+    invalid.update((r.exec_hash, r.task_id, r.repeat) for r in records
+                   if not np.isfinite(r.score))
+    if missing or invalid:
+        raise ValueError(
+            f"Incomplete P2 tensor: {len(missing)} missing, {len(invalid)} invalid cells; "
+            f"examples: {(missing + sorted(invalid))[:3]}. "
+            "Rerun the same probe to fill missing cells from cache before ranking.")
+
+
 def _per_task(records, exec_hash: str, task_ids: Sequence[str]) -> np.ndarray:
     by_task: dict[str, list[float]] = {}
     for record in records:
@@ -123,9 +146,10 @@ def summarize_probe(records, single_runs: Sequence[StrategyRun],
                     epsilons: Sequence[float] = (0.02, 0.03, 0.04),
                     top_gap: float = 0.02, old_gate: float = 0.05,
                     max_row_truncation_spread: float | None = 0.03,
-                    splits: int = 50, seed: int = 20261018) -> dict:
+                    splits: int = 50, seed: int = 20261018, repeats: int = 1) -> dict:
     """Everything P2 decides on, from the probe's records. Pure: no endpoint."""
     task_ids = list(task_ids)
+    require_complete_probe(records, graphs, task_ids, repeats)
     rows = {label: _per_task(records, t.exec_hash, task_ids) for label, t in graphs.items()}
     stats = {}
     for label, topology in graphs.items():
@@ -259,6 +283,9 @@ def run_probe(config: dict, executor, runner: SingleAgentRunner | None,
 
     from audit.run_audit import build_tensor
 
+    task_ids = [t.task_id for t in tasks]
+    if repeats < 1 or len(task_ids) < 2 or len(set(task_ids)) != len(task_ids):
+        raise ValueError("P2 needs positive repeats and at least two distinct tasks")
     cells = [(topology, task, 0, repeat) for topology in graphs.values()
              for task in tasks for repeat in range(repeats)]
     manifest = build_tensor(config, executor, cells, concurrency=concurrency,
@@ -266,22 +293,51 @@ def run_probe(config: dict, executor, runner: SingleAgentRunner | None,
     wanted = {t.task_id for t in tasks}
     hashes = {t.exec_hash for t in graphs.values()}
     records = [r for r in executor.cache.export(executor.exp)
-               if r.task_id in wanted and r.exec_hash in hashes and r.repeat < repeats]
+               if r.task_id in wanted and r.exec_hash in hashes and r.repeat < repeats
+               and r.seed == executor.sample_seed]
+    # Do not spend more on pi_single or emit selection gates after failed graph calls.
+    require_complete_probe(records, graphs, task_ids, repeats)
     single_runs: list[StrategyRun] = []
+    single_tokens = {"logical": 0, "fresh": 0, "calls": 0}
     if runner is not None:
         sweep = sorted({int(k) for k in config["single_agent"]["budget_sweep"]})
+        runner.cache.bind_experiment(
+            {"selfcheck": runner.templates["selfcheck.v1"], "samples": runner.samples,
+             "budget_sweep": sweep, "refine_rounds": [1, 2, 3], "seed": 0},
+            scope="pi_single")
+        cached_before = runner.cache.keys(runner.exp)
         params = {"self_consistency": sweep, "best_of_n_selfcheck": sweep}
         with ThreadPoolExecutor(max(1, concurrency)) as pool:
             for runs in pool.map(lambda task: runner.run_task(task, 0, params), tasks):
                 single_runs += runs
+        # Frontier points share draws and checks. Count cached physical calls once,
+        # rather than summing the overlapping logical costs of every strategy.
+        calls = [r for r in runner.cache.export(runner.exp)
+                 if r.split_role == "pi_single" and r.task_id in wanted and r.seed == 0]
+        single_tokens = {
+            "logical": sum(r.prompt_tokens + r.gen_tokens for r in calls),
+            "fresh": sum(r.prompt_tokens + r.gen_tokens for r in calls
+                         if key_for(r) not in cached_before),
+            "calls": len(calls),
+        }
     summary = summarize_probe(
         records, single_runs, graphs, [t.task_id for t in tasks],
-        budget_tokens=budget_tokens,
+        budget_tokens=budget_tokens, repeats=repeats,
+        val_tasks=config.get("splits", {}).get("val", 300),
         max_row_truncation_spread=config["acceptance"].get("max_row_truncation_spread"))
     summary["single_agent_frontier"] = [
         {"strategy": p.strategy, "param": p.param, "accuracy": p.accuracy,
          "mean_tokens": p.mean_tokens} for p in _accumulate(single_runs)]
-    summary["tokens"] = manifest["tokens"]
+    topology_tokens = manifest["tokens"]
+    summary["tokens"] = {
+        "logical": topology_tokens["logical"] + single_tokens["logical"],
+        "fresh": topology_tokens["fresh"] + single_tokens["fresh"],
+        "topology": topology_tokens,
+        "pi_single": single_tokens,
+        "note": "Totals include topology and unique pi_single calls (shared frontier "
+                "draws counted once); fresh excludes cache hits. Historical unscored "
+                "topology attempts are reported separately under topology.",
+    }
     return summary
 
 

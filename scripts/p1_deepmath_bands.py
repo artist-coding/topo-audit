@@ -22,11 +22,11 @@ import pathlib
 import sys
 
 import numpy as np
-import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from data.loaders.math import PROMPT_TEMPLATE, score_output, task_id_for  # noqa: E402
+from data.loaders.deepmath import load_band  # noqa: E402
+from data.loaders.math import PROMPT_TEMPLATE, score_output  # noqa: E402
 from scripts.p1_headroom import call  # noqa: E402
 
 RAW = pathlib.Path("data/raw/deepmath.parquet")
@@ -48,20 +48,12 @@ def main() -> None:
                     help="band lower bounds; each spans +0.5 (e.g. 8.5 -> [8.5, 9.0))")
     args = ap.parse_args()
 
-    pool = pd.read_parquet(RAW)
-    pool["task_id"] = pool["question"].map(task_id_for)
-    pool = pool.drop_duplicates(subset="task_id")
     rng = np.random.default_rng(20261014)
 
     bands = ([(low, low + 0.5) for low in args.bands] if args.bands else BANDS)
     jobs = []
     for low, high in bands:
-        # Half-open [low, high): with closed intervals every problem rated exactly 9.0
-        # sat in both the "8.5" and the "9.0" band (and 8.5 in both "8.0" and "8.5").
-        # The top band keeps its upper edge.
-        top = high >= pool["difficulty"].max()
-        upper = (pool["difficulty"] <= high) if top else (pool["difficulty"] < high)
-        band = pool[(pool["difficulty"] >= low) & upper]
+        band = load_band(RAW, low, high - low)
         if len(band) < args.per_band:
             print(f"  band [{low}, {high}] has only {len(band)} problems, skipping")
             continue

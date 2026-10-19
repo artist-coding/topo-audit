@@ -146,6 +146,7 @@ def build_deepmath(seed: int, n_train: int, n_audit: int, n_val: int, n_test: in
     ids = {role: list(df["task_id"]) for role, df in roles.items()}
     payload = {
         "family": "deepmath",
+        "answer_filter": "nonempty_nonbinary_v1",
         "seed": seed,
         "band": [band, band + 0.5],
         "source": {"all_roles": "zwhe99/DeepMath-103K (single source split)"},
@@ -158,7 +159,8 @@ def build_deepmath(seed: int, n_train: int, n_audit: int, n_val: int, n_test: in
         "difficulty_by_task": {tid: float(d) for df in roles.values()
                                for tid, d in zip(df["task_id"], df["difficulty"])},
     }
-    blob = json.dumps({k: payload[k] for k in ("family", "seed", "band", "sizes", "splits")},
+    blob = json.dumps({k: payload[k] for k in
+                      ("family", "answer_filter", "seed", "band", "sizes", "splits")},
                       sort_keys=True)
     payload["fingerprint"] = hashlib.sha256(blob.encode()).hexdigest()[:16]
     return payload
